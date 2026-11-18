@@ -195,4 +195,9 @@ internal static class Native
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+
+    public const int SM_CMONITORS = 80;
+
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int index);
 }

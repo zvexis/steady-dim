@@ -155,6 +155,9 @@ internal sealed class TrayApp : ApplicationContext
         };
         startupItem.Click += (_, _) => ToggleStartup();
 
+        var rescan = new ToolStripMenuItem("Rescan displays");
+        rescan.Click += (_, _) => _controller.ScheduleRescan("manual tray rescan", 0);
+
         var reset = new ToolStripMenuItem("Reset to full brightness");
         reset.Click += (_, _) =>
         {
@@ -172,6 +175,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(deepDimItem);
         menu.Items.Add(startupItem);
+        menu.Items.Add(rescan);
         menu.Items.Add(reset);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(log);

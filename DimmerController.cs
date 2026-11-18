@@ -28,6 +28,7 @@ internal sealed class DimmerController : IDisposable
     private readonly AppConfig _config;
     private readonly System.Threading.Timer _saveTimer;
     private readonly System.Threading.Timer _magRetryTimer;
+    private readonly System.Threading.Timer _watchdogTimer;
 
     private List<DisplayInfo> _displays = new();
     private List<MonitorState> _monitors = new();
@@ -38,6 +39,7 @@ internal sealed class DimmerController : IDisposable
     private bool _savePending;
     private float? _lastMagScale;
     private int _magRetryAttempts;
+    private DateTime _lastWatchdogRescan = DateTime.MinValue;
 
     public DimmerController(AppConfig config)
     {
@@ -54,6 +56,50 @@ internal sealed class DimmerController : IDisposable
             null,
             Timeout.Infinite,
             Timeout.Infinite);
+
+        _watchdogTimer = new System.Threading.Timer(
+            _ => WatchdogTick(),
+            null,
+            5000,
+            10000);
+    }
+
+    private void WatchdogTick()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            var expected = Native.GetSystemMetrics(Native.SM_CMONITORS);
+            List<MonitorState> snapshot;
+            lock (_stateGate)
+            {
+                snapshot = _monitors.ToList();
+            }
+
+            var missingDdc = snapshot.Any(m => !m.DdcAvailable);
+            var countMismatch = expected > 0 && snapshot.Count != expected;
+            if (!missingDdc && !countMismatch)
+            {
+                return;
+            }
+
+            if ((DateTime.UtcNow - _lastWatchdogRescan).TotalSeconds < 25)
+            {
+                return;
+            }
+
+            _lastWatchdogRescan = DateTime.UtcNow;
+            Log.Info($"Watchdog rescan: expected={expected}, known={snapshot.Count}, missingDdc={missingDdc}.");
+            ScheduleRescan("watchdog", 250);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Watchdog failed: " + ex.Message);
+        }
     }
 
     public event EventHandler? MonitorsChanged;
@@ -98,6 +144,14 @@ internal sealed class DimmerController : IDisposable
         }
 
         await RescanWithRetryAsync(10, 1000).ConfigureAwait(false);
+
+        var snapshot = GetMonitors();
+        if (snapshot.Count == 0 || snapshot.Any(m => !m.DdcAvailable))
+        {
+            Log.Info("Some displays are not DDC-ready yet; scheduling a quick retry.");
+            ScheduleRescan("startup DDC retry", 1500);
+        }
+
         ApplyMag();
     }
 
@@ -228,6 +282,8 @@ internal sealed class DimmerController : IDisposable
                     Display = display
                 };
 
+                Log.Info($"Display state: {display.Name}; id={display.Id}; device={display.DeviceName}; ddc={display.DdcAvailable}; handle=0x{display.DdcHandle.ToInt64():X}.");
+
                 if (display.DdcAvailable)
                 {
                     anyDdc = true;
@@ -295,8 +351,11 @@ internal sealed class DimmerController : IDisposable
         var state = FindMonitor(id);
         if (state is null)
         {
+            Log.Warn($"Brightness request for unknown monitor id '{id}'.");
             return;
         }
+
+        Log.Info($"Brightness request: {state.Name} ({id}) -> {percent}%.");
 
         state.TargetPercent = percent;
         state.DdcError = null;
@@ -323,6 +382,7 @@ internal sealed class DimmerController : IDisposable
             var current = FindMonitor(state.Id);
             if (current is null)
             {
+                Log.Warn($"Monitor disappeared before brightness apply: {state.Id}.");
                 return;
             }
 
@@ -345,12 +405,17 @@ internal sealed class DimmerController : IDisposable
 
     private static async Task<bool> ApplyDdcCoreAsync(DisplayInfo display, int percent)
     {
-        if (!display.DdcAvailable || display.DdcHandle == IntPtr.Zero)
+        if (!display.DdcAvailable)
         {
+            Log.Warn($"DDC unavailable for {display.Name} ({display.DeviceName}).");
             return false;
         }
 
         var raw = MapPercentToRaw(display, percent);
+        if (display.DdcCurrent == raw)
+        {
+            return true;
+        }
 
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -358,8 +423,30 @@ internal sealed class DimmerController : IDisposable
             {
                 if (Native.SetMonitorBrightness(display.DdcHandle, raw))
                 {
-                    display.DdcCurrent = raw;
-                    return true;
+                    await Task.Delay(80).ConfigureAwait(false);
+
+                    if (Native.GetMonitorBrightness(
+                            display.DdcHandle,
+                            out _,
+                            out var readback,
+                            out _))
+                    {
+                        display.DdcCurrent = readback;
+                        Log.Info($"DDC set {display.Name} ({display.DeviceName}) handle=0x{display.DdcHandle.ToInt64():X}: target={percent}% raw={raw}, readback={readback}.");
+
+                        if (Math.Abs((long)readback - raw) <= 1)
+                        {
+                            return true;
+                        }
+
+                        Log.Warn($"DDC readback mismatch for {display.Name}: wrote {raw}, read {readback}.");
+                    }
+                    else
+                    {
+                        display.DdcCurrent = raw;
+                        Log.Info($"DDC set {display.Name} ({display.DeviceName}) handle=0x{display.DdcHandle.ToInt64():X}: target={percent}% raw={raw}, readback unavailable.");
+                        return true;
+                    }
                 }
             }
             catch (Exception ex)
@@ -373,7 +460,7 @@ internal sealed class DimmerController : IDisposable
             }
         }
 
-        Log.Warn($"SetMonitorBrightness failed for {display.Name} ({display.DeviceName}) at {percent}%.");
+        Log.Warn($"SetMonitorBrightness failed for {display.Name} ({display.DeviceName}) at {percent}% (handle=0x{display.DdcHandle.ToInt64():X}).");
         return false;
     }
 
@@ -609,6 +696,7 @@ internal sealed class DimmerController : IDisposable
             _pendingRescan?.Dispose();
             _saveTimer.Dispose();
             _magRetryTimer.Dispose();
+            _watchdogTimer.Dispose();
         }
         catch
         {

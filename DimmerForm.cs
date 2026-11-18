@@ -377,10 +377,12 @@ internal sealed class DimmerForm : Form
 
                 var value = new Label
                 {
-                    Text = monitor.DdcAvailable ? $"{monitor.TargetPercent}%" : "DDC unavailable",
+                    Text = MonitorValueText(monitor),
                     AutoSize = true,
                     TextAlign = ContentAlignment.MiddleRight,
-                    ForeColor = monitor.DdcAvailable ? SystemColors.WindowText : Color.Firebrick,
+                    ForeColor = monitor.DdcAvailable && string.IsNullOrEmpty(monitor.DdcError)
+                        ? SystemColors.WindowText
+                        : Color.Firebrick,
                     Margin = new Padding(6, 0, 0, 0)
                 };
 
@@ -449,10 +451,10 @@ internal sealed class DimmerForm : Form
 
                 row.Slider.Value = Math.Clamp(monitor.TargetPercent, 0, 100);
                 row.Slider.Enabled = monitor.DdcAvailable;
-                row.Value.Text = monitor.DdcAvailable
-                    ? $"{monitor.TargetPercent}%"
-                    : "DDC unavailable";
-                row.Value.ForeColor = monitor.DdcAvailable ? SystemColors.WindowText : Color.Firebrick;
+                row.Value.Text = MonitorValueText(monitor);
+                row.Value.ForeColor = monitor.DdcAvailable && string.IsNullOrEmpty(monitor.DdcError)
+                    ? SystemColors.WindowText
+                    : Color.Firebrick;
             }
 
             _deepDimSlider.Enabled = _controller.Config.DeepDimEnabled;
@@ -641,6 +643,18 @@ internal sealed class DimmerForm : Form
     {
         var output = 100 - reduction;
         return $"{reduction}% reduction ({output}% output)";
+    }
+
+    private static string MonitorValueText(MonitorState monitor)
+    {
+        if (!monitor.DdcAvailable)
+        {
+            return "DDC unavailable";
+        }
+
+        return string.IsNullOrEmpty(monitor.DdcError)
+            ? $"{monitor.TargetPercent}%"
+            : $"{monitor.TargetPercent}% (DDC error)";
     }
 
     protected override void Dispose(bool disposing)

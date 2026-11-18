@@ -27,7 +27,7 @@ SteadyDim avoids that architecture:
 
 ## Features
 
-- Per-monitor DDC/CI brightness sliders.
+- Per-monitor DDC/CI brightness sliders, including three or more displays.
 - Configurable global deep-night dim, default **80% reduction** when enabled.
 - Tray panel; no main window and no overlay.
 - Automatic rescan on:
@@ -35,7 +35,9 @@ SteadyDim avoids that architecture:
   - monitor arrival/removal,
   - resume from sleep,
   - session unlock.
-- Retries DDC operations, because monitors can be slow to answer after wake.
+- A watchdog that detects when a powered-off monitor comes back or a display is
+  not yet DDC-ready.
+- Retries DDC operations and verifies the brightness readback.
 - Scheduled task at logon with a **10 second delay** and restart-on-failure.
 - Portable settings and logs in `data\`.
 - No driver, Windows service, or administrator rights.
@@ -81,6 +83,7 @@ Tray menu:
 - Open SteadyDim
 - Deep night dim
 - Start at logon
+- Rescan displays
 - Reset to full brightness
 - Open log
 - Exit
@@ -166,7 +169,7 @@ Create an empty GitHub repository, then push `main` and the tag:
 ```powershell
 git remote add origin https://github.com/<owner>/steady-dim.git
 git push -u origin main
-git push origin v1.0.0
+git push origin v1.0.1
 ```
 
 The tag push builds the release on GitHub. You can also attach the locally built

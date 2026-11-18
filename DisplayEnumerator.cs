@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 
 namespace SteadyDim;
@@ -218,6 +219,17 @@ internal static class DisplayEnumerator
         {
             displays[0].Name += " — Left";
             displays[1].Name += " — Right";
+            return;
+        }
+
+        var sameRow = displays.All(d =>
+            Math.Abs(d.Bounds.Top - displays[0].Bounds.Top) <= 100);
+
+        if (displays.Count == 3 && sameRow)
+        {
+            displays[0].Name += " — Left";
+            displays[1].Name += " — Center";
+            displays[2].Name += " — Right";
             return;
         }
 
