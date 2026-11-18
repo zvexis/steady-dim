@@ -159,12 +159,19 @@ The output is `dist\SteadyDim-win-x64.zip`.
 ## Release
 
 The GitHub Actions workflow in `.github/workflows/build.yml` builds the app on
-Windows and attaches a zip to a GitHub Release when a `v*` tag is pushed:
+Windows and attaches a zip to a GitHub Release when a `v*` tag is pushed.
+
+Create an empty GitHub repository, then push `main` and the tag:
 
 ```powershell
-git tag v1.0.0
+git remote add origin https://github.com/<owner>/steady-dim.git
+git push -u origin main
 git push origin v1.0.0
 ```
+
+The tag push builds the release on GitHub. You can also attach the locally built
+`dist\SteadyDim-win-x64.zip` manually.
+
 
 ## License
 
