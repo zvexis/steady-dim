@@ -1,0 +1,29 @@
+# Build output
+bin/
+obj/
+dist/
+publish/
+artifacts/
+
+# Runtime state
+data/
+*.log
+*.tmp
+*.bad
+
+# IDE / tooling
+.vs/
+.vscode/
+*.user
+*.suo
+*.pdb
+
+# Screenshots / local test output
+*.png
+!docs/*.png
+!docs/**/*.png
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
