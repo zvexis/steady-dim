@@ -39,6 +39,7 @@ internal sealed class DimmerController : IDisposable
     private bool _savePending;
     private float? _lastMagScale;
     private int _magRetryAttempts;
+    private string _topologySignature = "";
     private DateTime _lastWatchdogRescan = DateTime.MinValue;
 
     public DimmerController(AppConfig config)
@@ -104,6 +105,7 @@ internal sealed class DimmerController : IDisposable
 
     public event EventHandler? MonitorsChanged;
     public event EventHandler? StateChanged;
+    public event EventHandler? TopologyChanged;
 
     public AppConfig Config => _config;
     public bool DeepDimAvailable { get; private set; } = true;
@@ -321,9 +323,26 @@ internal sealed class DimmerController : IDisposable
                 QueueSave();
             }
 
+            var topologySignature = string.Join(
+                "|",
+                newStates
+                    .OrderBy(s => s.Id)
+                    .Select(s => $"{s.Id}:{s.Display.Bounds.Left},{s.Display.Bounds.Top},{s.Display.Bounds.Width}x{s.Display.Bounds.Height}"));
+
+            var topologyChanged = !string.IsNullOrEmpty(_topologySignature) &&
+                                  !string.Equals(_topologySignature, topologySignature, StringComparison.Ordinal);
+            _topologySignature = topologySignature;
+
             Log.Info($"Rescan complete: {newStates.Count} display(s), DDC available on {newStates.Count(s => s.DdcAvailable)}.");
             MonitorsChanged?.Invoke(this, EventArgs.Empty);
             StateChanged?.Invoke(this, EventArgs.Empty);
+
+            if (topologyChanged)
+            {
+                Log.Info("Display topology changed; requesting a process restart to reinitialize Magnification.");
+                TopologyChanged?.Invoke(this, EventArgs.Empty);
+            }
+
             return anyDdc;
         }
         finally
@@ -606,15 +625,31 @@ internal sealed class DimmerController : IDisposable
     {
         scale = Math.Clamp(scale, 0.05f, 1.0f);
 
-        // Reapplying an unchanged effect right after a display/DDC change can
-        // return ERROR_NOT_READY even though the existing effect is still live.
-        // Treat the cached scale as authoritative unless the user changes it.
         if (_lastMagScale is { } last && Math.Abs(last - scale) < 0.001f)
         {
             _magRetryAttempts = 0;
             return true;
         }
 
+        if (TryApplyMagEffect(scale))
+        {
+            return true;
+        }
+
+        _lastMagScale = null;
+
+        if (!_disposed && _magRetryAttempts < 3)
+        {
+            _magRetryAttempts++;
+            _magRetryTimer.Change(1000, Timeout.Infinite);
+            Log.Info($"Scheduling Mag retry {_magRetryAttempts}/3.");
+        }
+
+        return false;
+    }
+
+    private bool TryApplyMagEffect(float scale)
+    {
         var effect = new Native.MAGCOLOREFFECT
         {
             transform = new float[25]
@@ -637,23 +672,14 @@ internal sealed class DimmerController : IDisposable
             }
 
             var error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-            _lastMagScale = null;
             Log.Warn($"MagSetFullscreenColorEffect failed (Win32 {error}) at scale {scale:0.00}.");
-
-            if (!_disposed && _magRetryAttempts < 3)
-            {
-                _magRetryAttempts++;
-                _magRetryTimer.Change(1000, Timeout.Infinite);
-                Log.Info($"Scheduling Mag retry {_magRetryAttempts}/3.");
-            }
+            return false;
         }
         catch (Exception ex)
         {
-            _lastMagScale = null;
             Log.Warn("MagSetFullscreenColorEffect threw: " + ex.Message);
+            return false;
         }
-
-        return false;
     }
 
     public void QueueSave()
@@ -708,15 +734,6 @@ internal sealed class DimmerController : IDisposable
             if (_magInitialized)
             {
                 SetMagEffect(1.0f);
-                try
-                {
-                    Native.MagUninitialize();
-                }
-                catch (Exception ex)
-                {
-                    Log.Warn("MagUninitialize failed: " + ex.Message);
-                }
-
                 _magInitialized = false;
             }
         }

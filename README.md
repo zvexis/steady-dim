@@ -37,6 +37,8 @@ SteadyDim avoids that architecture:
   - session unlock.
 - A watchdog that detects when a powered-off monitor comes back or a display is
   not yet DDC-ready.
+- Automatic app restart after a display-topology change, so the compositor
+  deep-dim layer is freshly initialized.
 - Retries DDC operations and verifies the brightness readback.
 - Scheduled task at logon with a **10 second delay** and restart-on-failure.
 - Portable settings and logs in `data\`.

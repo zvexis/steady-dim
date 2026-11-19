@@ -25,7 +25,6 @@ internal static class Recovery
 
                 var set = Native.MagSetFullscreenColorEffect(ref identity);
                 Log.Info($"Recovery Mag identity set: {set} (Win32 {Marshal.GetLastWin32Error()}).");
-                Native.MagUninitialize();
             }
         }
         catch (Exception ex)
@@ -38,7 +37,7 @@ internal static class Recovery
             var displays = DisplayEnumerator.Enumerate();
             foreach (var display in displays)
             {
-                if (display.DdcAvailable && display.DdcHandle != IntPtr.Zero)
+                if (display.DdcAvailable)
                 {
                     var ok = Native.SetMonitorBrightness(display.DdcHandle, display.DdcMaximum);
                     Log.Info($"Recovery DDC {display.Name} -> {display.DdcMaximum}: {ok}.");

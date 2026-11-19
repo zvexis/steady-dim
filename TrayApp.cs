@@ -25,6 +25,7 @@ internal sealed class TrayApp : ApplicationContext
 
     private DimmerForm? _form;
     private bool _exiting;
+    private bool _restarting;
 
     public TrayApp(AppOptions options, AppConfig config)
     {
@@ -73,6 +74,7 @@ internal sealed class TrayApp : ApplicationContext
 
         _controller.MonitorsChanged += (_, _) => Post(UpdateMenu);
         _controller.StateChanged += (_, _) => Post(UpdateMenu);
+        _controller.TopologyChanged += (_, _) => Post(RestartForTopologyChange);
 
         _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppInfo.ShowEventName);
         _showWait = ThreadPool.RegisterWaitForSingleObject(
@@ -322,7 +324,59 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    private void RestartForTopologyChange()
+    {
+        if (_exiting || _restarting)
+        {
+            return;
+        }
+
+        _restarting = true;
+        Log.Info("Restarting SteadyDim after display topology change.");
+
+        try
+        {
+            var vbs = Path.Combine(AppContext.BaseDirectory, "Start SteadyDim.vbs");
+            if (File.Exists(vbs))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "wscript.exe",
+                    Arguments = $"\"{vbs}\" /restart",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+            }
+            else
+            {
+                var command = AppInfo.StartupCommand;
+                var arguments = AppInfo.IsDotnetHosted
+                    ? $"\"{AppInfo.EntryAssemblyPath}\" --restart"
+                    : "--restart";
+
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c timeout /t 3 /nobreak >nul & start \"\" \"{command}\" {arguments}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Could not launch the restart helper.", ex);
+        }
+
+        ExitAppCore(restarting: true);
+    }
+
     private void ExitApp()
+    {
+        ExitAppCore(restarting: false);
+    }
+
+    private void ExitAppCore(bool restarting)
     {
         if (_exiting)
         {
@@ -330,7 +384,7 @@ internal sealed class TrayApp : ApplicationContext
         }
 
         _exiting = true;
-        Log.Info("Exit requested.");
+        Log.Info(restarting ? "Exiting for restart." : "Exit requested.");
 
         try
         {

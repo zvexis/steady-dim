@@ -33,7 +33,7 @@ internal static class Diagnostics
                     builder.AppendLine($"  current RGB scale: {effect.transform[0]:0.000}, {effect.transform[6]:0.000}, {effect.transform[12]:0.000}");
                 }
 
-                Native.MagUninitialize();
+                // Deliberately do not call MagUninitialize; process exit is enough.
             }
         }
         catch (Exception ex)

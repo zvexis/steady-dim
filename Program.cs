@@ -5,7 +5,7 @@ using System.Windows.Forms;
 
 namespace SteadyDim;
 
-internal sealed record AppOptions(bool Startup, bool NoStartup, bool Diagnose, bool Reset);
+internal sealed record AppOptions(bool Startup, bool NoStartup, bool Diagnose, bool Reset, bool Restart);
 
 internal static class Program
 {
@@ -31,6 +31,21 @@ internal static class Program
         Application.SetCompatibleTextRenderingDefault(false);
 
         using var mutex = new Mutex(true, AppInfo.MutexName, out var createdNew);
+        if (!createdNew && options.Restart)
+        {
+            try
+            {
+                if (mutex.WaitOne(10000))
+                {
+                    createdNew = true;
+                }
+            }
+            catch (AbandonedMutexException)
+            {
+                createdNew = true;
+            }
+        }
+
         if (!createdNew)
         {
             SignalExistingInstance();
@@ -62,7 +77,8 @@ internal static class Program
         var noStartup = args.Any(a => string.Equals(a, "--no-startup", StringComparison.OrdinalIgnoreCase));
         var diagnose = args.Any(a => string.Equals(a, "--diagnose", StringComparison.OrdinalIgnoreCase));
         var reset = args.Any(a => string.Equals(a, "--reset", StringComparison.OrdinalIgnoreCase));
-        return new AppOptions(startup, noStartup, diagnose, reset);
+        var restart = args.Any(a => string.Equals(a, "--restart", StringComparison.OrdinalIgnoreCase));
+        return new AppOptions(startup, noStartup, diagnose, reset, restart);
     }
 
     private static void SignalExistingInstance()

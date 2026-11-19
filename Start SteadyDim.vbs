@@ -1,9 +1,11 @@
 Option Explicit
 
-Dim fso, shell, baseDir, dllPath, dotnetPath
+Dim fso, shell, baseDir, dllPath, dotnetPath, appArgs, isRestart
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
+
+isRestart = WScript.Arguments.Named.Exists("restart")
 
 baseDir = fso.GetParentFolderName(WScript.ScriptFullName)
 dllPath = fso.BuildPath(baseDir, "SteadyDim.dll")
@@ -23,5 +25,12 @@ If Not fso.FileExists(dotnetPath) Then
     dotnetPath = "dotnet.exe"
 End If
 
+appArgs = """" & dllPath & """"
+
+If isRestart Then
+    WScript.Sleep 2500
+    appArgs = appArgs & " --restart"
+End If
+
 ' Window style 0 hides the dotnet console window; the tray app provides the UI.
-shell.Run """" & dotnetPath & """ """ & dllPath & """", 0, False
+shell.Run """" & dotnetPath & """ " & appArgs, 0, False

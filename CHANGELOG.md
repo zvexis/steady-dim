@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.2 — 2026-11-19
+
+- Fixed deep dim silently stopping when a monitor was added/removed or the
+  display topology otherwise changed after startup.
+- Detect display-topology changes and automatically restart the app after a
+  short delay so the Magnification API is freshly initialized.
+- Avoid in-process `MagUninitialize`/`MagInitialize` cycles, which can leave the
+  full-screen magnifier in an `ERROR_INVALID_PARAMETER` state.
+
 ## 1.0.1 — 2026-11-18
 
 - Fixed a bug where the first monitor's valid DDC physical handle `0` was
