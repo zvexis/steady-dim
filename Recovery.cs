@@ -43,6 +43,26 @@ internal static class Recovery
                     Log.Info($"Recovery DDC {display.Name} -> {display.DdcMaximum}: {ok}.");
                 }
 
+                if (display.GammaAvailable && display.GammaDc != IntPtr.Zero)
+                {
+                    var identity = new ushort[768];
+                    for (var i = 0; i < 256; i++)
+                    {
+                        var value = (ushort)(i * 257);
+                        identity[i] = value;
+                        identity[256 + i] = value;
+                        identity[512 + i] = value;
+                    }
+
+                    var ok = Native.SetDeviceGammaRamp(display.GammaDc, identity);
+                    if (ok)
+                    {
+                        display.OriginalGammaRamp = identity;
+                    }
+
+                    Log.Info($"Recovery gamma {display.Name} -> identity: {ok}.");
+                }
+
                 display.Dispose();
             }
         }
@@ -56,9 +76,11 @@ internal static class Recovery
             var config = ConfigStore.Load();
             config.DeepDimEnabled = false;
             config.DeepDimPercent = 80;
+            config.SharedHardwareBrightness = 100;
             foreach (var monitor in config.Monitors.Values)
             {
                 monitor.Brightness = 100;
+                monitor.GammaTrim = 0;
             }
 
             ConfigStore.Save(config);

@@ -151,6 +151,25 @@ internal static class Native
         uint physicalMonitorArraySize,
         PHYSICAL_MONITOR[] physicalMonitorArray);
 
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateDC(
+        string? driver,
+        string? device,
+        string? output,
+        IntPtr initializationData);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetDeviceGammaRamp(IntPtr hdc, [Out] ushort[] ramp);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetDeviceGammaRamp(IntPtr hdc, [In] ushort[] ramp);
+
     [DllImport("Magnification.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool MagInitialize();

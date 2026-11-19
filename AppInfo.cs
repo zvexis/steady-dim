@@ -8,7 +8,7 @@ namespace SteadyDim;
 internal static class AppInfo
 {
     public const string Name = "SteadyDim";
-    public const string Version = "1.0.2";
+    public const string Version = "1.1.0";
     public const string MutexName = @"Local\SteadyDim.SingleInstance";
     public const string ShowEventName = @"Local\SteadyDim.Show";
     public const string TaskName = "SteadyDim";

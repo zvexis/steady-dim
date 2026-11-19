@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0 — 2026-11-19
+
+- Swapped the panel layout: one shared DDC hardware-brightness slider for all
+  monitors, plus per-monitor gamma trim sliders.
+- Added per-display gamma trim in the 0–50% range with readback verification.
+- Added automatic gamma reapplication after rescans; gamma is restored to its
+  captured baseline when displays are released.
+- Added a per-monitor DDC availability status.
+- Migrated settings to schema 2 with a shared hardware brightness value.
+- `--reset` now clears gamma trims and restores an identity gamma ramp.
+
 ## 1.0.2 — 2026-11-19
 
 - Fixed deep dim silently stopping when a monitor was added/removed or the

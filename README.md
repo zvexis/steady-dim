@@ -2,9 +2,12 @@
 
 A small Windows tray app for reliable screen dimming **without overlay windows**.
 
-SteadyDim combines two layers:
+SteadyDim combines three layers:
 
-- **DDC/CI hardware brightness** per monitor — the real backlight.
+- **Shared DDC/CI hardware brightness** — one slider drives the real backlight
+  on every monitor.
+- **Per-monitor gamma trim** — 0–50% extra dim per display, for balancing
+  panels of different brightness.
 - **Optional global deep-night dim** through the Windows Magnification API.
 
 The deep layer is applied by the desktop compositor, so new windows, taskbar
@@ -27,7 +30,9 @@ SteadyDim avoids that architecture:
 
 ## Features
 
-- Per-monitor DDC/CI brightness sliders, including three or more displays.
+- One shared DDC/CI brightness slider for all monitors, including three or more
+  displays.
+- Per-monitor gamma trim, 0–50%, for balancing different panels.
 - Configurable global deep-night dim, default **80% reduction** when enabled.
 - Tray panel; no main window and no overlay.
 - Automatic rescan on:
@@ -64,8 +69,9 @@ Download the release zip and extract it to a writable folder.
    apphosts and deny registry/AppData access.
 2. If your security software does not sandbox unsigned apps, `SteadyDim.exe` can
    be launched directly instead.
-3. In the panel, set each monitor's hardware brightness and enable
-   **Deep night dim** if you need to go below the monitor's minimum.
+3. In the panel, set the shared **Hardware brightness** level, then use each
+   monitor's **Gamma trim** to balance panels. Enable **Deep night dim** if you
+   need to go below the monitor's minimum.
 4. Leave **Start at logon** checked to register the `SteadyDim` scheduled task.
 
 The panel hides when it loses focus. Reopen it from the tray icon or by running
@@ -75,9 +81,11 @@ the launcher again.
 
 The tray panel has:
 
+- **Hardware brightness (all monitors)** — one DDC/CI slider applied to every
+  active display.
+- **Per-monitor gamma trim** — 0–50% GPU gamma trim for each display. SDR only.
 - **Deep night dim** — global compositor dim, 0–90% reduction. Opening the panel
   temporarily pauses this layer so the panel stays readable; closing restores it.
-- **Hardware brightness (DDC/CI)** — one slider per monitor.
 - **Start at logon** — creates or removes the scheduled task.
 
 Tray menu:
@@ -106,7 +114,7 @@ back to `%LOCALAPPDATA%\SteadyDim`.
 
 ```text
 SteadyDim.exe --diagnose    Write a hardware/API diagnostic and exit.
-SteadyDim.exe --reset       Clear deep dim, set DDC to maximum, reset config.
+SteadyDim.exe --reset       Clear deep dim, gamma trims, and DDC, reset config.
 SteadyDim.exe --no-startup  Start without checking/registering startup.
 SteadyDim.exe --startup     Startup-task launch mode.
 ```
@@ -120,13 +128,14 @@ dotnet SteadyDim.dll --diagnose
 
 ## Limitations
 
-- The deep layer is **global**, not per monitor. Per-monitor differences come
-  from DDC brightness.
-- It is a desktop compositor effect. It may not apply to the secure desktop
-  (UAC) or some exclusive-fullscreen paths; the hardware base still applies.
-- The app intentionally does **not** use `SetDeviceGammaRamp`. Windows rejects
-  deep ramps, they reset on display events, and their behavior in HDR is
-  undefined.
+- The deep layer is **global**, not per monitor. Use the per-monitor gamma trim
+  for differences between panels; the gamma range is limited to 50%.
+- The deep layer is a desktop compositor effect. It may not apply to the secure
+  desktop (UAC) or some exclusive-fullscreen paths; the hardware base still
+  applies.
+- Per-monitor gamma uses `SetDeviceGammaRamp`. Windows rejects deeper ramps,
+  gamma resets on display events (the app reapplies it), and its behavior in HDR
+  is undefined. Gamma can also interact with color-calibration software.
 - Windows Magnifier also uses the Magnification API; running both at once may
   conflict.
 - DDC/CI support varies by monitor, cable, dock, and driver. The app reports
@@ -171,7 +180,7 @@ Create an empty GitHub repository, then push `main` and the tag:
 ```powershell
 git remote add origin https://github.com/<owner>/steady-dim.git
 git push -u origin main
-git push origin v1.0.1
+git push origin v1.1.0
 ```
 
 The tag push builds the release on GitHub. You can also attach the locally built

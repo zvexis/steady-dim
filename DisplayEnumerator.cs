@@ -17,11 +17,41 @@ internal sealed class DisplayInfo : IDisposable
     public uint DdcMaximum { get; set; }
     public uint DdcCurrent { get; set; }
     public string DdcDescription { get; set; } = "";
+    public IntPtr GammaDc { get; set; }
+    public ushort[]? OriginalGammaRamp { get; set; }
+    public bool GammaAvailable { get; set; }
 
     internal Native.PHYSICAL_MONITOR[]? PhysicalMonitors { get; set; }
 
     public void Dispose()
     {
+        if (GammaDc != IntPtr.Zero)
+        {
+            if (OriginalGammaRamp is not null)
+            {
+                try
+                {
+                    Native.SetDeviceGammaRamp(GammaDc, OriginalGammaRamp);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn("Could not restore gamma ramp on dispose: " + ex.Message);
+                }
+            }
+
+            try
+            {
+                Native.DeleteDC(GammaDc);
+            }
+            catch
+            {
+                // Best effort.
+            }
+
+            GammaDc = IntPtr.Zero;
+            GammaAvailable = false;
+        }
+
         if (PhysicalMonitors is { Length: > 0 } monitors)
         {
             try
@@ -71,6 +101,7 @@ internal static class DisplayEnumerator
             };
 
             TryAttachDdc(display, hMonitor);
+            TryAttachGamma(display);
             displays.Add(display);
             return true;
         };
@@ -125,6 +156,40 @@ internal static class DisplayEnumerator
         catch (Exception ex)
         {
             Log.Error("DDC enumeration failed for " + display.DeviceName, ex);
+        }
+    }
+
+    private static void TryAttachGamma(DisplayInfo display)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(display.DeviceName))
+            {
+                return;
+            }
+
+            var dc = Native.CreateDC("DISPLAY", display.DeviceName, null, IntPtr.Zero);
+            if (dc == IntPtr.Zero)
+            {
+                Log.Warn($"Could not create display DC for {display.DeviceName}.");
+                return;
+            }
+
+            var original = new ushort[768];
+            if (!Native.GetDeviceGammaRamp(dc, original))
+            {
+                Log.Warn($"Could not read gamma ramp for {display.Name} ({display.DeviceName}).");
+                Native.DeleteDC(dc);
+                return;
+            }
+
+            display.GammaDc = dc;
+            display.OriginalGammaRamp = original;
+            display.GammaAvailable = true;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Gamma enumeration failed for " + display.DeviceName, ex);
         }
     }
 
