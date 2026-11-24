@@ -17,17 +17,18 @@ internal sealed class DimmerForm : Form
     private TrackBar _hardwareSlider = null!;
     private Label _hardwareValue = null!;
     private Label _hardwareStatus = null!;
-    private CheckBox _deepDimCheck = null!;
-    private TrackBar _deepDimSlider = null!;
-    private Label _deepDimValue = null!;
+    private TrackBar _masterGammaSlider = null!;
+    private Label _masterGammaValue = null!;
     private readonly CheckBox _startupCheck;
     private readonly Label _statusLabel;
     private readonly Dictionary<string, GammaRow> _gammaRows = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _pendingGamma = new(StringComparer.OrdinalIgnoreCase);
     private readonly System.Windows.Forms.Timer _hardwareTimer;
     private readonly System.Windows.Forms.Timer _gammaTimer;
+    private readonly System.Windows.Forms.Timer _masterGammaTimer;
 
     private int? _pendingHardware;
+    private int? _pendingMasterGamma;
     private bool _updating;
     private bool _allowClose;
     private DateTime _shownAt;
@@ -60,18 +61,21 @@ internal sealed class DimmerForm : Form
         _gammaTimer = new System.Windows.Forms.Timer { Interval = 100 };
         _gammaTimer.Tick += (_, _) => FlushPendingGamma();
 
+        _masterGammaTimer = new System.Windows.Forms.Timer { Interval = 100 };
+        _masterGammaTimer.Tick += (_, _) => FlushPendingMasterGamma();
+
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            RowCount = 8,
+            RowCount = 7,
             Padding = new Padding(14),
             BackColor = SystemColors.Window
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        for (var i = 0; i < 8; i++)
+        for (var i = 0; i < 7; i++)
         {
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         }
@@ -86,7 +90,7 @@ internal sealed class DimmerForm : Form
 
         var subtitle = new Label
         {
-            Text = "Shared hardware backlight, per-monitor gamma trim, global deep-night layer.",
+            Text = "Shared hardware backlight plus per-monitor gamma trim.",
             AutoSize = true,
             ForeColor = SystemColors.GrayText,
             Margin = new Padding(0, 0, 0, 10)
@@ -94,7 +98,6 @@ internal sealed class DimmerForm : Form
 
         var hardwareGroup = BuildHardwareGroup();
         var gammaGroup = BuildGammaGroup();
-        var deepGroup = BuildDeepDimGroup();
 
         var startup = new CheckBox
         {
@@ -147,10 +150,9 @@ internal sealed class DimmerForm : Form
         root.Controls.Add(subtitle, 0, 1);
         root.Controls.Add(hardwareGroup, 0, 2);
         root.Controls.Add(gammaGroup, 0, 3);
-        root.Controls.Add(deepGroup, 0, 4);
-        root.Controls.Add(startup, 0, 5);
-        root.Controls.Add(_statusLabel, 0, 6);
-        root.Controls.Add(footer, 0, 7);
+        root.Controls.Add(startup, 0, 4);
+        root.Controls.Add(_statusLabel, 0, 5);
+        root.Controls.Add(footer, 0, 6);
         Controls.Add(root);
 
         Paint += (_, e) => e.Graphics.DrawRectangle(SystemPens.ActiveBorder, 0, 0, Width - 1, Height - 1);
@@ -177,15 +179,6 @@ internal sealed class DimmerForm : Form
         {
             _shownAt = DateTime.UtcNow;
             PositionNearTray();
-            _controller.SetPanelOpen(true);
-        };
-
-        VisibleChanged += (_, _) =>
-        {
-            if (!Visible)
-            {
-                _controller.SetPanelOpen(false);
-            }
         };
 
         FormClosing += (_, e) =>
@@ -223,6 +216,7 @@ internal sealed class DimmerForm : Form
     {
         FlushPendingHardware();
         FlushPendingGamma();
+        FlushPendingMasterGamma();
         _hiddenAt = DateTime.UtcNow;
         Hide();
     }
@@ -315,11 +309,34 @@ internal sealed class DimmerForm : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            RowCount = 2
+            RowCount = 4
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (var i = 0; i < 4; i++)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
+
+        _masterGammaValue = new Label
+        {
+            Text = $"All monitors: {_controller.Config.GammaMaster ?? 0}%",
+            AutoSize = true,
+            Margin = new Padding(0, 0, 0, 0)
+        };
+
+        _masterGammaSlider = new TrackBar
+        {
+            Minimum = 0,
+            Maximum = 50,
+            TickFrequency = 10,
+            SmallChange = 1,
+            LargeChange = 5,
+            Value = Math.Clamp(_controller.Config.GammaMaster ?? 0, 0, 50),
+            Dock = DockStyle.Top,
+            Height = 45,
+            Margin = new Padding(0, 0, 0, 0)
+        };
+        _masterGammaSlider.ValueChanged += MasterGammaSlider_ValueChanged;
 
         _gammaPanel = new FlowLayoutPanel
         {
@@ -332,7 +349,7 @@ internal sealed class DimmerForm : Form
 
         var note = new Label
         {
-            Text = "Per-display GPU gamma, 0–50%. SDR only; use the global layer for deeper dimming.",
+            Text = "Master sets every monitor; individual sliders fine-tune. Gamma 0–50%, SDR only.",
             AutoSize = true,
             ForeColor = SystemColors.GrayText,
             MaximumSize = new Size(340, 0),
@@ -340,82 +357,9 @@ internal sealed class DimmerForm : Form
             Margin = new Padding(0, 3, 0, 0)
         };
 
-        layout.Controls.Add(_gammaPanel, 0, 0);
-        layout.Controls.Add(note, 0, 1);
-        group.Controls.Add(layout);
-        return group;
-    }
-
-    private GroupBox BuildDeepDimGroup()
-    {
-        var group = new GroupBox
-        {
-            Text = "Deep night dim (all monitors)",
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Dock = DockStyle.Top,
-            Padding = new Padding(10),
-            Margin = new Padding(0, 0, 0, 8)
-        };
-
-        var layout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1,
-            RowCount = 4
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        for (var i = 0; i < 4; i++)
-        {
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        }
-
-        _deepDimCheck = new CheckBox
-        {
-            Text = "Enabled",
-            AutoSize = true,
-            Checked = _controller.Config.DeepDimEnabled,
-            Margin = new Padding(0, 0, 0, 2)
-        };
-        _deepDimCheck.CheckedChanged += DeepDimCheck_CheckedChanged;
-
-        _deepDimSlider = new TrackBar
-        {
-            Minimum = 0,
-            Maximum = 90,
-            TickFrequency = 10,
-            SmallChange = 1,
-            LargeChange = 10,
-            Value = Math.Clamp(_controller.Config.DeepDimPercent, 0, 90),
-            Dock = DockStyle.Top,
-            Height = 45,
-            Enabled = _controller.Config.DeepDimEnabled,
-            Margin = new Padding(0, 0, 0, 0)
-        };
-        _deepDimSlider.ValueChanged += DeepDimSlider_ValueChanged;
-
-        _deepDimValue = new Label
-        {
-            Text = FormatDeepDim(_deepDimSlider.Value),
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 0)
-        };
-
-        var note = new Label
-        {
-            Text = "Global compositor layer. Pauses while this panel is open; close it to apply.",
-            AutoSize = true,
-            ForeColor = SystemColors.GrayText,
-            MaximumSize = new Size(340, 0),
-            Font = new Font("Segoe UI", 8F),
-            Margin = new Padding(0, 3, 0, 0)
-        };
-
-        layout.Controls.Add(_deepDimCheck, 0, 0);
-        layout.Controls.Add(_deepDimSlider, 0, 1);
-        layout.Controls.Add(_deepDimValue, 0, 2);
+        layout.Controls.Add(_masterGammaValue, 0, 0);
+        layout.Controls.Add(_masterGammaSlider, 0, 1);
+        layout.Controls.Add(_gammaPanel, 0, 2);
         layout.Controls.Add(note, 0, 3);
         group.Controls.Add(layout);
         return group;
@@ -555,10 +499,9 @@ internal sealed class DimmerForm : Form
                     : Color.Firebrick;
             }
 
-            _deepDimCheck.Checked = _controller.Config.DeepDimEnabled;
-            _deepDimSlider.Value = Math.Clamp(_controller.Config.DeepDimPercent, 0, 90);
-            _deepDimSlider.Enabled = _controller.Config.DeepDimEnabled;
-            _deepDimValue.Text = FormatDeepDim(_deepDimSlider.Value);
+            var master = Math.Clamp(_controller.Config.GammaMaster ?? 0, 0, 50);
+            _masterGammaSlider.Value = master;
+            _masterGammaValue.Text = $"All monitors: {master}%";
         }
         finally
         {
@@ -596,6 +539,27 @@ internal sealed class DimmerForm : Form
         _gammaTimer.Start();
     }
 
+    private void MasterGammaSlider_ValueChanged(object? sender, EventArgs e)
+    {
+        _masterGammaValue.Text = $"All monitors: {_masterGammaSlider.Value}%";
+        if (_updating)
+        {
+            return;
+        }
+
+        var previous = _updating;
+        _updating = true;
+        foreach (var row in _gammaRows.Values)
+        {
+            row.Slider.Value = _masterGammaSlider.Value;
+        }
+        _updating = previous;
+
+        _pendingMasterGamma = _masterGammaSlider.Value;
+        _masterGammaTimer.Stop();
+        _masterGammaTimer.Start();
+    }
+
     private void FlushPendingHardware()
     {
         _hardwareTimer.Stop();
@@ -624,26 +588,16 @@ internal sealed class DimmerForm : Form
         }
     }
 
-    private void DeepDimCheck_CheckedChanged(object? sender, EventArgs e)
+    private void FlushPendingMasterGamma()
     {
-        if (_updating)
+        _masterGammaTimer.Stop();
+        if (_pendingMasterGamma is not { } value)
         {
             return;
         }
 
-        _deepDimSlider.Enabled = _deepDimCheck.Checked;
-        _controller.SetDeepDimEnabled(_deepDimCheck.Checked);
-    }
-
-    private void DeepDimSlider_ValueChanged(object? sender, EventArgs e)
-    {
-        _deepDimValue.Text = FormatDeepDim(_deepDimSlider.Value);
-        if (_updating)
-        {
-            return;
-        }
-
-        _controller.SetDeepDimPercent(_deepDimSlider.Value);
+        _pendingMasterGamma = null;
+        _controller.SetAllGammaTrim(value);
     }
 
     private void StartupCheck_CheckedChanged(object? sender, EventArgs e)
@@ -765,12 +719,6 @@ internal sealed class DimmerForm : Form
         }
     }
 
-    private static string FormatDeepDim(int reduction)
-    {
-        var output = 100 - reduction;
-        return $"{reduction}% reduction ({output}% output)";
-    }
-
     private static string GammaValueText(MonitorState monitor)
     {
         if (!monitor.GammaAvailable)
@@ -791,6 +739,7 @@ internal sealed class DimmerForm : Form
             _controller.StateChanged -= Controller_StateChanged;
             _hardwareTimer.Dispose();
             _gammaTimer.Dispose();
+            _masterGammaTimer.Dispose();
         }
 
         base.Dispose(disposing);

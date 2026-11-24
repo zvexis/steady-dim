@@ -26,107 +26,30 @@ internal sealed class MonitorState
 internal sealed class DimmerController : IDisposable
 {
     private readonly object _stateGate = new();
-    private readonly object _magGate = new();
     private readonly SemaphoreSlim _ddcGate = new(1, 1);
     private readonly SemaphoreSlim _gammaGate = new(1, 1);
     private readonly AppConfig _config;
     private readonly System.Threading.Timer _saveTimer;
-    private readonly System.Threading.Timer _magRetryTimer;
     private readonly System.Threading.Timer _watchdogTimer;
 
     private List<DisplayInfo> _displays = new();
     private List<MonitorState> _monitors = new();
     private CancellationTokenSource? _pendingRescan;
     private bool _disposed;
-    private bool _magInitialized;
-    private bool _panelOpen;
     private bool _savePending;
-    private float? _lastMagScale;
-    private int _magRetryAttempts;
-    private bool _magRecoveryRequested;
-    private string _topologySignature = "";
     private DateTime _lastWatchdogRescan = DateTime.MinValue;
 
     public DimmerController(AppConfig config)
     {
         _config = config;
         _saveTimer = new System.Threading.Timer(_ => SaveNow(), null, Timeout.Infinite, Timeout.Infinite);
-        _magRetryTimer = new System.Threading.Timer(
-            _ =>
-            {
-                if (!_disposed)
-                {
-                    ApplyMag();
-                }
-            },
-            null,
-            Timeout.Infinite,
-            Timeout.Infinite);
-
-        _watchdogTimer = new System.Threading.Timer(
-            _ => WatchdogTick(),
-            null,
-            5000,
-            10000);
-    }
-
-    private void WatchdogTick()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        try
-        {
-            VerifyMagEffect();
-
-            var expected = Native.GetSystemMetrics(Native.SM_CMONITORS);
-            List<MonitorState> snapshot;
-            lock (_stateGate)
-            {
-                snapshot = _monitors.ToList();
-            }
-
-            var missingDdc = snapshot.Any(m => !m.DdcAvailable);
-            var countMismatch = expected > 0 && snapshot.Count != expected;
-            if (!missingDdc && !countMismatch)
-            {
-                return;
-            }
-
-            if ((DateTime.UtcNow - _lastWatchdogRescan).TotalSeconds < 25)
-            {
-                return;
-            }
-
-            _lastWatchdogRescan = DateTime.UtcNow;
-            Log.Info($"Watchdog rescan: expected={expected}, known={snapshot.Count}, missingDdc={missingDdc}.");
-            ScheduleRescan("watchdog", 250);
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("Watchdog failed: " + ex.Message);
-        }
+        _watchdogTimer = new System.Threading.Timer(_ => WatchdogTick(), null, 5000, 10000);
     }
 
     public event EventHandler? MonitorsChanged;
     public event EventHandler? StateChanged;
-    public event EventHandler? TopologyChanged;
-    public event EventHandler? MagRecoveryRequested;
 
     public AppConfig Config => _config;
-    public bool DeepDimAvailable { get; private set; } = true;
-    public bool MagInitialized
-    {
-        get
-        {
-            lock (_magGate)
-            {
-                return _magInitialized;
-            }
-        }
-    }
 
     public IReadOnlyList<MonitorState> GetMonitors()
     {
@@ -148,8 +71,6 @@ internal sealed class DimmerController : IDisposable
     {
         if (startup)
         {
-            // Task Scheduler already delays 10s; this is a second cushion for the
-            // shell/display stack, which is still settling right after logon.
             await Task.Delay(1500).ConfigureAwait(false);
         }
 
@@ -162,7 +83,8 @@ internal sealed class DimmerController : IDisposable
             ScheduleRescan("startup DDC retry", 1500);
         }
 
-        ApplyMag();
+        // Persist schema migration and the derived gamma master once at startup.
+        QueueSave();
     }
 
     public void ScheduleRescan(string reason, int delayMilliseconds = 750)
@@ -197,7 +119,6 @@ internal sealed class DimmerController : IDisposable
 
             Log.Info("Rescan triggered: " + reason);
             await RescanWithRetryAsync(4, 700).ConfigureAwait(false);
-            ApplyMag();
         }
         catch (OperationCanceledException)
         {
@@ -250,19 +171,26 @@ internal sealed class DimmerController : IDisposable
                 return false;
             }
 
-            // Restore gamma and release DDC handles before creating new display
-            // contexts, so a new gamma baseline is not captured while dimmed.
             List<DisplayInfo> oldDisplays;
+            List<MonitorState> oldStates;
             lock (_stateGate)
             {
                 oldDisplays = _displays;
+                oldStates = _monitors;
                 _displays = new List<DisplayInfo>();
                 _monitors = new List<MonitorState>();
             }
 
+            var oldByDevice = oldStates
+                .Where(s => !string.IsNullOrWhiteSpace(s.DeviceName))
+                .GroupBy(s => s.DeviceName, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
             foreach (var old in oldDisplays)
             {
-                old.Dispose();
+                // Keep gamma applied across DDC-only rescans; transfer the
+                // baseline and applied state to the new DisplayInfo below.
+                old.Dispose(restoreGamma: false);
             }
 
             var newDisplays = DisplayEnumerator.Enumerate();
@@ -300,6 +228,18 @@ internal sealed class DimmerController : IDisposable
 
                 monitorConfig.Brightness = shared;
                 var gammaTrim = Math.Clamp(monitorConfig.GammaTrim, 0, 50);
+                oldByDevice.TryGetValue(display.DeviceName, out var oldState);
+
+                var gammaNeedsApply = oldState is null ||
+                                      oldState.GammaTrim != gammaTrim ||
+                                      (gammaTrim > 0 && !oldState.Display.GammaApplied);
+
+                if (oldState is not null)
+                {
+                    display.OriginalGammaRamp = oldState.Display.OriginalGammaRamp;
+                    display.GammaApplied = oldState.Display.GammaApplied;
+                }
+
                 var state = new MonitorState
                 {
                     Id = display.Id,
@@ -315,7 +255,7 @@ internal sealed class DimmerController : IDisposable
                     Display = display
                 };
 
-                Log.Info($"Display state: {display.Name}; id={display.Id}; device={display.DeviceName}; ddc={display.DdcAvailable}; gamma={display.GammaAvailable}; handle=0x{display.DdcHandle.ToInt64():X}.");
+                Log.Info($"Display state: {display.Name}; id={display.Id}; device={display.DeviceName}; ddc={display.DdcAvailable}; gamma={display.GammaAvailable}; gammaApplied={display.GammaApplied}; handle=0x{display.DdcHandle.ToInt64():X}.");
 
                 if (display.DdcAvailable)
                 {
@@ -333,10 +273,17 @@ internal sealed class DimmerController : IDisposable
                     state.DdcError = "DDC unavailable";
                 }
 
-                var gammaApplied = ApplyGammaCore(display, gammaTrim);
-                state.GammaError = gammaApplied
-                    ? null
-                    : (display.GammaAvailable ? "Gamma rejected" : "Gamma unavailable");
+                if (gammaNeedsApply)
+                {
+                    var gammaApplied = ApplyGammaCore(display, gammaTrim);
+                    state.GammaError = gammaApplied
+                        ? null
+                        : (display.GammaAvailable ? "Gamma rejected" : "Gamma unavailable");
+                }
+                else
+                {
+                    state.GammaError = oldState?.GammaError;
+                }
 
                 newStates.Add(state);
             }
@@ -352,26 +299,9 @@ internal sealed class DimmerController : IDisposable
                 QueueSave();
             }
 
-            var topologySignature = string.Join(
-                "|",
-                newStates
-                    .OrderBy(s => s.Id)
-                    .Select(s => $"{s.Id}:{s.Display.Bounds.Left},{s.Display.Bounds.Top},{s.Display.Bounds.Width}x{s.Display.Bounds.Height}"));
-
-            var topologyChanged = !string.IsNullOrEmpty(_topologySignature) &&
-                                  !string.Equals(_topologySignature, topologySignature, StringComparison.Ordinal);
-            _topologySignature = topologySignature;
-
             Log.Info($"Rescan complete: {newStates.Count} display(s), DDC available on {newStates.Count(s => s.DdcAvailable)}, gamma available on {newStates.Count(s => s.GammaAvailable)}.");
             MonitorsChanged?.Invoke(this, EventArgs.Empty);
             StateChanged?.Invoke(this, EventArgs.Empty);
-
-            if (topologyChanged)
-            {
-                Log.Info("Display topology changed; requesting a process restart to reinitialize Magnification.");
-                TopologyChanged?.Invoke(this, EventArgs.Empty);
-            }
-
             return anyDdc;
         }
         finally
@@ -452,6 +382,67 @@ internal sealed class DimmerController : IDisposable
         }
     }
 
+    public void SetAllGammaTrim(int percent)
+    {
+        percent = Math.Clamp(percent, 0, 50);
+        _config.GammaMaster = percent;
+
+        foreach (var monitor in GetMonitors())
+        {
+            monitor.GammaTrim = percent;
+            monitor.GammaError = null;
+
+            if (_config.Monitors.TryGetValue(monitor.Id, out var monitorConfig))
+            {
+                monitorConfig.Name = monitor.Name;
+                monitorConfig.GammaTrim = percent;
+            }
+        }
+
+        Log.Info($"Master gamma request: all monitors -> {percent}%.");
+        QueueSave();
+        _ = ApplyAllGammaAsync(percent);
+    }
+
+    private async Task ApplyAllGammaAsync(int percent)
+    {
+        await _gammaGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var ids = GetMonitors().Select(m => m.Id).ToList();
+            foreach (var id in ids)
+            {
+                var current = FindMonitor(id);
+                if (current is null)
+                {
+                    continue;
+                }
+
+                var applied = ApplyGammaCore(current.Display, percent);
+                current.GammaTrim = percent;
+                current.GammaError = applied
+                    ? null
+                    : (current.GammaAvailable ? "Gamma rejected" : "Gamma unavailable");
+            }
+
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Set master gamma failed.", ex);
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        finally
+        {
+            _gammaGate.Release();
+        }
+    }
+
     public void SetGammaTrim(string id, int percent)
     {
         percent = Math.Clamp(percent, 0, 50);
@@ -529,8 +520,20 @@ internal sealed class DimmerController : IDisposable
 
         if (trim == 0)
         {
-            return display.OriginalGammaRamp is not null &&
-                   SetGammaVerified(display, display.OriginalGammaRamp, "restore", logSuccess: false);
+            if (!display.GammaApplied)
+            {
+                return true;
+            }
+
+            var restored = display.OriginalGammaRamp is not null &&
+                           SetGammaVerified(display, display.OriginalGammaRamp, "restore", logSuccess: false);
+
+            if (restored)
+            {
+                display.GammaApplied = false;
+            }
+
+            return restored;
         }
 
         var factor = 1.0 - trim / 100.0;
@@ -543,7 +546,13 @@ internal sealed class DimmerController : IDisposable
             ramp[512 + i] = value;
         }
 
-        return SetGammaVerified(display, ramp, $"{trim}% trim", logSuccess: true);
+        var applied = SetGammaVerified(display, ramp, $"{trim}% trim", logSuccess: true);
+        if (applied)
+        {
+            display.GammaApplied = true;
+        }
+
+        return applied;
     }
 
     private static bool SetGammaVerified(DisplayInfo display, ushort[] ramp, string label, bool logSuccess)
@@ -672,9 +681,8 @@ internal sealed class DimmerController : IDisposable
     public void ResetToFull()
     {
         var monitors = GetMonitors();
-        _config.DeepDimEnabled = false;
-        _config.DeepDimPercent = 80;
         _config.SharedHardwareBrightness = 100;
+        _config.GammaMaster = 0;
 
         foreach (var monitor in monitors)
         {
@@ -694,267 +702,45 @@ internal sealed class DimmerController : IDisposable
         }
 
         QueueSave();
-        ApplyMag();
         _ = ApplyAllHardwareAsync(100);
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    public void RepairDeepDim()
-    {
-        lock (_magGate)
-        {
-            _lastMagScale = null;
-            _magRetryAttempts = 0;
-            _magRecoveryRequested = false;
-        }
-
-        Log.Info("Manual Magnification repair requested.");
-        ApplyMag();
-    }
-
-    public void SetDeepDimEnabled(bool enabled)
-    {
-        _config.DeepDimEnabled = enabled;
-        QueueSave();
-        ApplyMag();
-    }
-
-    public void SetDeepDimPercent(int percent)
-    {
-        _config.DeepDimPercent = Math.Clamp(percent, 0, 90);
-        QueueSave();
-        ApplyMag();
-    }
-
-    public void SetPanelOpen(bool open)
-    {
-        _panelOpen = open;
-        if (_config.PauseDeepDimWhilePanelOpen)
-        {
-            ApplyMag();
-        }
-    }
-
-    public void ApplyMag()
+    private void WatchdogTick()
     {
         if (_disposed)
         {
             return;
         }
 
-        lock (_magGate)
+        try
         {
-            if (_disposed)
+            var expected = Native.GetSystemMetrics(Native.SM_CMONITORS);
+            List<MonitorState> snapshot;
+            lock (_stateGate)
+            {
+                snapshot = _monitors.ToList();
+            }
+
+            var missingDdc = snapshot.Any(m => !m.DdcAvailable);
+            var countMismatch = expected > 0 && snapshot.Count != expected;
+            if (!missingDdc && !countMismatch)
             {
                 return;
             }
 
-            var shouldDim = _config.DeepDimEnabled &&
-                            _config.DeepDimPercent > 0 &&
-                            !(_panelOpen && _config.PauseDeepDimWhilePanelOpen);
-
-            if (!shouldDim)
+            if ((DateTime.UtcNow - _lastWatchdogRescan).TotalSeconds < 25)
             {
-                if (_magInitialized)
-                {
-                    SetMagEffect(1.0f);
-                }
-
                 return;
             }
 
-            var scale = (float)(1.0 - _config.DeepDimPercent / 100.0);
-            if (!EnsureMagInitialized())
-            {
-                ScheduleMagRetry(scale, 21);
-                return;
-            }
-
-            SetMagEffect(scale);
-        }
-    }
-
-    private bool EnsureMagInitialized()
-    {
-        if (_magInitialized)
-        {
-            return true;
-        }
-
-        try
-        {
-            if (Native.MagInitialize())
-            {
-                _magInitialized = true;
-                DeepDimAvailable = true;
-                Log.Info("Magnification API initialized.");
-                return true;
-            }
-
-            var error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-            DeepDimAvailable = false;
-            Log.Error($"MagInitialize failed (Win32 {error}). Deep dim is unavailable.");
+            _lastWatchdogRescan = DateTime.UtcNow;
+            Log.Info($"Watchdog rescan: expected={expected}, known={snapshot.Count}, missingDdc={missingDdc}.");
+            ScheduleRescan("watchdog", 250);
         }
         catch (Exception ex)
         {
-            DeepDimAvailable = false;
-            Log.Error("MagInitialize threw.", ex);
-        }
-
-        return false;
-    }
-
-    private bool SetMagEffect(float scale)
-    {
-        scale = Math.Clamp(scale, 0.05f, 1.0f);
-
-        if (_lastMagScale is { } last && Math.Abs(last - scale) < 0.001f)
-        {
-            _magRetryAttempts = 0;
-            _magRecoveryRequested = false;
-            return true;
-        }
-
-        if (TryApplyMagEffect(scale, out var error))
-        {
-            _lastMagScale = scale;
-            _magRetryAttempts = 0;
-            _magRecoveryRequested = false;
-            Log.Info($"Mag effect scale={scale:0.00} ({(1 - scale) * 100:0}% reduction).");
-            return true;
-        }
-
-        _lastMagScale = null;
-        ScheduleMagRetry(scale, error);
-        return false;
-    }
-
-    private bool TryApplyMagEffect(float scale, out int error)
-    {
-        var effect = new Native.MAGCOLOREFFECT
-        {
-            transform = new float[25]
-        };
-
-        effect.transform[0] = scale;
-        effect.transform[6] = scale;
-        effect.transform[12] = scale;
-        effect.transform[18] = 1.0f;
-        effect.transform[24] = 1.0f;
-
-        try
-        {
-            if (Native.MagSetFullscreenColorEffect(ref effect))
-            {
-                error = 0;
-                return true;
-            }
-
-            error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-            return false;
-        }
-        catch (Exception ex)
-        {
-            error = -1;
-            Log.Warn("MagSetFullscreenColorEffect threw: " + ex.Message);
-            return false;
-        }
-    }
-
-    private void ScheduleMagRetry(float scale, int error)
-    {
-        if (_disposed || _magRecoveryRequested)
-        {
-            return;
-        }
-
-        _magRetryAttempts++;
-
-        if (_magRetryAttempts >= 10)
-        {
-            RequestMagRecovery($"persistent Magnification failure (Win32 {error})");
-            return;
-        }
-
-        var delayMs = _magRetryAttempts switch
-        {
-            1 => 1000,
-            2 => 2000,
-            3 => 4000,
-            4 => 8000,
-            5 => 16000,
-            _ => 30000
-        };
-
-        _magRetryTimer.Change(delayMs, Timeout.Infinite);
-
-        if (_magRetryAttempts == 1 || _magRetryAttempts % 5 == 0)
-        {
-            Log.Warn($"MagSetFullscreenColorEffect failed (Win32 {error}) at scale {scale:0.00}; retry {_magRetryAttempts} in {delayMs / 1000}s.");
-        }
-    }
-
-    private void RequestMagRecovery(string reason)
-    {
-        if (_magRecoveryRequested || _disposed)
-        {
-            return;
-        }
-
-        _magRecoveryRequested = true;
-        Log.Warn("Requesting process restart for Magnification recovery: " + reason);
-        MagRecoveryRequested?.Invoke(this, EventArgs.Empty);
-    }
-
-    private void VerifyMagEffect()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        var shouldDim = _config.DeepDimEnabled &&
-                        _config.DeepDimPercent > 0 &&
-                        !(_panelOpen && _config.PauseDeepDimWhilePanelOpen);
-
-        var desired = shouldDim ? (float)(1.0 - _config.DeepDimPercent / 100.0) : 1.0f;
-
-        float? cached;
-        lock (_magGate)
-        {
-            cached = _lastMagScale;
-        }
-
-        if (cached is null || Math.Abs(cached.Value - desired) > 0.001f)
-        {
-            ApplyMag();
-            return;
-        }
-
-        var effect = new Native.MAGCOLOREFFECT
-        {
-            transform = new float[25]
-        };
-
-        try
-        {
-            if (!Native.MagGetFullscreenColorEffect(ref effect) ||
-                Math.Abs(effect.transform[0] - desired) > 0.001f ||
-                Math.Abs(effect.transform[6] - desired) > 0.001f ||
-                Math.Abs(effect.transform[12] - desired) > 0.001f)
-            {
-                Log.Warn("Mag effect is missing or mismatched; reapplying.");
-                lock (_magGate)
-                {
-                    _lastMagScale = null;
-                }
-
-                ApplyMag();
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("Mag signature check failed: " + ex.Message);
+            Log.Warn("Watchdog failed: " + ex.Message);
         }
     }
 
@@ -997,21 +783,11 @@ internal sealed class DimmerController : IDisposable
             _pendingRescan?.Cancel();
             _pendingRescan?.Dispose();
             _saveTimer.Dispose();
-            _magRetryTimer.Dispose();
             _watchdogTimer.Dispose();
         }
         catch
         {
             // Best effort.
-        }
-
-        lock (_magGate)
-        {
-            if (_magInitialized)
-            {
-                SetMagEffect(1.0f);
-                _magInitialized = false;
-            }
         }
 
         lock (_stateGate)

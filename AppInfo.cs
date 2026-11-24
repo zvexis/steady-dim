@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
@@ -8,7 +8,7 @@ namespace SteadyDim;
 internal static class AppInfo
 {
     public const string Name = "SteadyDim";
-    public const string Version = "1.1.1";
+    public const string Version = "1.2.0";
     public const string MutexName = @"Local\SteadyDim.SingleInstance";
     public const string ShowEventName = @"Local\SteadyDim.Show";
     public const string TaskName = "SteadyDim";
@@ -92,3 +92,4 @@ internal static class AppInfo
         }
     }
 }
+

@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 — 2026-11-24
+
+- Removed the global Magnification deep-dim layer, its watchdog, and all
+  watchdog-triggered process restarts.
+- Dimming is now shared DDC hardware brightness plus per-monitor gamma trim.
+- Added a master gamma slider that pushes all per-monitor gamma sliders.
+- Gamma state persists across DDC-only rescans; ramps are rewritten only when a
+  slider or display actually changes.
+- Settings schema 3; removed deep-dim settings and added `GammaMaster`.
+
+## 1.1.2 — 2026-11-24
+
+- Gamma trim no longer writes a gamma ramp when the trim is 0% or was never
+  applied. Gamma writes can invalidate the full-screen Magnification effect.
+- Track whether gamma was actually applied and restore the original ramp only
+  when needed.
+- Removed watchdog-triggered process restarts. Magnification now retries
+  persistently without restarting the app, eliminating the bright/dim blink.
+- Automatic restart remains only for display-topology changes.
+
 ## 1.1.1 — 2026-11-24
 
 - Replaced the three one-second Magnification retries with persistent backoff

@@ -15,12 +15,10 @@ internal sealed class MonitorConfig
 
 internal sealed class AppConfig
 {
-    public int SchemaVersion { get; set; } = 2;
-    public bool DeepDimEnabled { get; set; }
-    public int DeepDimPercent { get; set; } = 80;
+    public int SchemaVersion { get; set; } = 3;
     public bool StartWithWindows { get; set; } = true;
     public int? SharedHardwareBrightness { get; set; }
-    public bool PauseDeepDimWhilePanelOpen { get; set; } = true;
+    public int? GammaMaster { get; set; }
     public Dictionary<string, MonitorConfig> Monitors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     [System.Text.Json.Serialization.JsonIgnore]
@@ -99,9 +97,12 @@ internal static class ConfigStore
 
     private static void Normalize(AppConfig config)
     {
-        config.SchemaVersion = 2;
-        config.DeepDimPercent = Math.Clamp(config.DeepDimPercent, 0, 90);
+        config.SchemaVersion = 3;
         config.Monitors ??= new Dictionary<string, MonitorConfig>(StringComparer.OrdinalIgnoreCase);
+        config.GammaMaster = Math.Clamp(
+            config.GammaMaster ?? (config.Monitors.Count > 0 ? config.Monitors.Values.Max(m => m.GammaTrim) : 0),
+            0,
+            50);
 
         if (config.SharedHardwareBrightness is null)
         {

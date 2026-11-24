@@ -1,52 +1,33 @@
 # SteadyDim
 
-A small Windows tray app for reliable screen dimming **without overlay windows**.
+A small Windows tray app for reliable screen dimming **without overlay windows
+and without touching the desktop compositor**.
 
-SteadyDim combines three layers:
+SteadyDim combines:
 
 - **Shared DDC/CI hardware brightness** — one slider drives the real backlight
   on every monitor.
-- **Per-monitor gamma trim** — 0–50% extra dim per display, for balancing
-  panels of different brightness.
-- **Optional global deep-night dim** through the Windows Magnification API.
+- **Per-monitor gamma trim** — 0–50% extra dim per display, for balancing panels
+  of different brightness.
+- **Master gamma slider** — pushes all per-monitor gamma sliders to one value,
+  then individual sliders fine-tune.
 
-The deep layer is applied by the desktop compositor, so new windows, taskbar
-thumbnails, and Alt+Tab cannot escape it by being "above" a topmost window.
-There is no transparent black window to lose a z-order race.
-
-## Why
-
-Many screen dimmers draw a click-through black overlay over each monitor. That
-works until a new topmost/elevated window, taskbar preview, Alt+Tab surface, or
-secure desktop gets above the overlay. The usual fixes are "toggle the overlay"
-or "restart the app".
-
-SteadyDim avoids that architecture:
-
-- hardware brightness is controlled through the monitor itself;
-- the extra dim is a compositor-level color transform;
-- the app rescans after display, power, and session events;
-- the hardware base remains dim even if the extra layer fails.
+There is no transparent black window and no full-screen Magnification effect, so
+there is no z-order race with new windows, taskbar previews, or Alt+Tab.
 
 ## Features
 
 - One shared DDC/CI brightness slider for all monitors, including three or more
   displays.
-- Per-monitor gamma trim, 0–50%, for balancing different panels.
-- Configurable global deep-night dim, default **80% reduction** when enabled.
+- Per-monitor gamma trim, 0–50%, plus a master slider that sets all of them.
+- Gamma state persists across DDC-only rescans; ramps are rewritten only when a
+  slider or display actually changes.
 - Tray panel; no main window and no overlay.
-- Automatic rescan on:
-  - display mode changes,
-  - monitor arrival/removal,
-  - resume from sleep,
-  - session unlock.
+- Automatic rescan on display mode changes, monitor arrival/removal, resume from
+  sleep, and session unlock.
 - A watchdog that detects when a powered-off monitor comes back or a display is
   not yet DDC-ready.
-- Automatic app restart after a display-topology change, so the compositor
-  deep-dim layer is freshly initialized.
 - Retries DDC operations and verifies the brightness readback.
-- Persistent deep-dim retries with backoff, plus a watchdog that reapplies the
-  effect if it disappears; a process restart is the last resort.
 - Scheduled task at logon with a **10 second delay** and restart-on-failure.
 - Portable settings and logs in `data\`.
 - No driver, Windows service, or administrator rights.
@@ -71,9 +52,9 @@ Download the release zip and extract it to a writable folder.
    apphosts and deny registry/AppData access.
 2. If your security software does not sandbox unsigned apps, `SteadyDim.exe` can
    be launched directly instead.
-3. In the panel, set the shared **Hardware brightness** level, then use each
-   monitor's **Gamma trim** to balance panels. Enable **Deep night dim** if you
-   need to go below the monitor's minimum.
+3. Set the shared **Hardware brightness** level, then use the master gamma
+   slider to dim all monitors together and the individual gamma sliders to
+   fine-tune each panel.
 4. Leave **Start at logon** checked to register the `SteadyDim` scheduled task.
 
 The panel hides when it loses focus. Reopen it from the tray icon or by running
@@ -85,18 +66,15 @@ The tray panel has:
 
 - **Hardware brightness (all monitors)** — one DDC/CI slider applied to every
   active display.
-- **Per-monitor gamma trim** — 0–50% GPU gamma trim for each display. SDR only.
-- **Deep night dim** — global compositor dim, 0–90% reduction. Opening the panel
-  temporarily pauses this layer so the panel stays readable; closing restores it.
+- **All monitors gamma** — master gamma trim, 0–50%, applied to every display.
+- **Per-monitor gamma trim** — individual 0–50% trims for fine-tuning.
 - **Start at logon** — creates or removes the scheduled task.
 
 Tray menu:
 
 - Open SteadyDim
-- Deep night dim
 - Start at logon
 - Rescan displays
-- Repair deep dim
 - Reset to full brightness
 - Open log
 - Exit
@@ -117,7 +95,7 @@ back to `%LOCALAPPDATA%\SteadyDim`.
 
 ```text
 SteadyDim.exe --diagnose    Write a hardware/API diagnostic and exit.
-SteadyDim.exe --reset       Clear deep dim, gamma trims, and DDC, reset config.
+SteadyDim.exe --reset       Reset DDC to maximum, clear gamma trims, reset config.
 SteadyDim.exe --no-startup  Start without checking/registering startup.
 SteadyDim.exe --startup     Startup-task launch mode.
 ```
@@ -131,16 +109,12 @@ dotnet SteadyDim.dll --diagnose
 
 ## Limitations
 
-- The deep layer is **global**, not per monitor. Use the per-monitor gamma trim
-  for differences between panels; the gamma range is limited to 50%.
-- The deep layer is a desktop compositor effect. It may not apply to the secure
-  desktop (UAC) or some exclusive-fullscreen paths; the hardware base still
-  applies.
-- Per-monitor gamma uses `SetDeviceGammaRamp`. Windows rejects deeper ramps,
-  gamma resets on display events (the app reapplies it), and its behavior in HDR
-  is undefined. Gamma can also interact with color-calibration software.
-- Windows Magnifier also uses the Magnification API; running both at once may
-  conflict.
+- Gamma trim is limited to **50%**. Windows rejects deeper ramps; 50% is the
+  reliable ceiling on the tested displays.
+- Gamma is SDR-only. Its behavior in HDR is undefined, and color-calibration
+  software may also change the ramp.
+- Gamma can reset after a display mode change; the app reapplies the configured
+  trims on the next rescan.
 - DDC/CI support varies by monitor, cable, dock, and driver. The app reports
   monitors that do not expose brightness control.
 
@@ -152,10 +126,9 @@ dotnet SteadyDim.dll --diagnose
   trusted/excluded files.
 - **A monitor is missing.** Enable DDC/CI in its OSD, check the cable/adapter,
   then use the tray menu or restart the app so it rescans.
-- **Deep dim stops after wake/display changes.** The app retries automatically;
-  if it does not recover, use **Repair deep dim** in the tray menu.
 - **The screen is too dark.** Use the tray menu **Reset to full brightness**, or
   run `--reset`.
+- **A gamma slider is rejected.** Use a lower value; 50% is the maximum.
 - **Something failed.** Check `data\steadydim.log` and run `--diagnose`.
 
 ## Build
@@ -185,12 +158,11 @@ Create an empty GitHub repository, then push `main` and the tag:
 ```powershell
 git remote add origin https://github.com/<owner>/steady-dim.git
 git push -u origin main
-git push origin v1.1.1
+git push origin v1.2.0
 ```
 
 The tag push builds the release on GitHub. You can also attach the locally built
 `dist\SteadyDim-win-x64.zip` manually.
-
 
 ## License
 

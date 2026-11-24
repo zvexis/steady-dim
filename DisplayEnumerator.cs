@@ -20,14 +20,20 @@ internal sealed class DisplayInfo : IDisposable
     public IntPtr GammaDc { get; set; }
     public ushort[]? OriginalGammaRamp { get; set; }
     public bool GammaAvailable { get; set; }
+    public bool GammaApplied { get; set; }
 
     internal Native.PHYSICAL_MONITOR[]? PhysicalMonitors { get; set; }
 
     public void Dispose()
     {
+        Dispose(restoreGamma: true);
+    }
+
+    public void Dispose(bool restoreGamma)
+    {
         if (GammaDc != IntPtr.Zero)
         {
-            if (OriginalGammaRamp is not null)
+            if (restoreGamma && GammaApplied && OriginalGammaRamp is not null)
             {
                 try
                 {
@@ -50,6 +56,11 @@ internal sealed class DisplayInfo : IDisposable
 
             GammaDc = IntPtr.Zero;
             GammaAvailable = false;
+
+            if (restoreGamma)
+            {
+                GammaApplied = false;
+            }
         }
 
         if (PhysicalMonitors is { Length: > 0 } monitors)

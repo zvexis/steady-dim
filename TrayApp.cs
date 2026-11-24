@@ -16,7 +16,6 @@ internal sealed class TrayApp : ApplicationContext
     private readonly MessageWindow _messages;
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _menu;
-    private readonly ToolStripMenuItem _deepDimItem;
     private readonly ToolStripMenuItem _startupItem;
     private readonly Control _dispatcher;
     private readonly Icon _icon;
@@ -25,7 +24,6 @@ internal sealed class TrayApp : ApplicationContext
 
     private DimmerForm? _form;
     private bool _exiting;
-    private bool _restarting;
 
     public TrayApp(AppOptions options, AppConfig config)
     {
@@ -61,7 +59,7 @@ internal sealed class TrayApp : ApplicationContext
         _messages.TaskbarCreated += () => Post(RestoreTrayIcon);
 
         _icon = IconFactory.CreateTrayIcon();
-        _menu = BuildMenu(out _deepDimItem, out _startupItem);
+        _menu = BuildMenu(out _startupItem);
         _tray = new NotifyIcon
         {
             Icon = _icon,
@@ -74,8 +72,6 @@ internal sealed class TrayApp : ApplicationContext
 
         _controller.MonitorsChanged += (_, _) => Post(UpdateMenu);
         _controller.StateChanged += (_, _) => Post(UpdateMenu);
-        _controller.TopologyChanged += (_, _) => Post(() => RestartApp("display topology change"));
-        _controller.MagRecoveryRequested += (_, _) => Post(() => RestartApp("persistent Magnification failure"));
 
         _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppInfo.ShowEventName);
         _showWait = ThreadPool.RegisterWaitForSingleObject(
@@ -136,21 +132,13 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
-    private ContextMenuStrip BuildMenu(
-        out ToolStripMenuItem deepDimItem,
-        out ToolStripMenuItem startupItem)
+    private ContextMenuStrip BuildMenu(out ToolStripMenuItem startupItem)
     {
         var menu = new ContextMenuStrip();
 
         var open = new ToolStripMenuItem("Open SteadyDim");
         open.Font = new Font(open.Font, FontStyle.Bold);
         open.Click += (_, _) => ShowForm();
-
-        deepDimItem = new ToolStripMenuItem("Deep night dim")
-        {
-            CheckOnClick = false
-        };
-        deepDimItem.Click += (_, _) => ToggleDeepDim();
 
         startupItem = new ToolStripMenuItem("Start at logon")
         {
@@ -160,9 +148,6 @@ internal sealed class TrayApp : ApplicationContext
 
         var rescan = new ToolStripMenuItem("Rescan displays");
         rescan.Click += (_, _) => _controller.ScheduleRescan("manual tray rescan", 0);
-
-        var repair = new ToolStripMenuItem("Repair deep dim");
-        repair.Click += (_, _) => _controller.RepairDeepDim();
 
         var reset = new ToolStripMenuItem("Reset to full brightness");
         reset.Click += (_, _) =>
@@ -179,10 +164,8 @@ internal sealed class TrayApp : ApplicationContext
 
         menu.Items.Add(open);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(deepDimItem);
         menu.Items.Add(startupItem);
         menu.Items.Add(rescan);
-        menu.Items.Add(repair);
         menu.Items.Add(reset);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(log);
@@ -234,12 +217,6 @@ internal sealed class TrayApp : ApplicationContext
         _form.ShowNearTray();
     }
 
-    private void ToggleDeepDim()
-    {
-        _controller.SetDeepDimEnabled(!_config.DeepDimEnabled);
-        UpdateMenu();
-    }
-
     private void ToggleStartup()
     {
         var enabled = !_config.StartWithWindows;
@@ -267,14 +244,8 @@ internal sealed class TrayApp : ApplicationContext
 
     private void UpdateMenu()
     {
-        _deepDimItem.Checked = _config.DeepDimEnabled;
         _startupItem.Checked = _config.StartWithWindows;
-
-        var text = _config.DeepDimEnabled
-            ? $"SteadyDim — deep dim {_config.DeepDimPercent}%"
-            : "SteadyDim — deep dim off";
-
-        _tray.Text = text.Length <= 63 ? text : text[..63];
+        _tray.Text = "SteadyDim";
     }
 
     private void RestoreTrayIcon()
@@ -329,59 +300,7 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
-    private void RestartApp(string reason)
-    {
-        if (_exiting || _restarting)
-        {
-            return;
-        }
-
-        _restarting = true;
-        Log.Info("Restarting SteadyDim: " + reason + ".");
-
-        try
-        {
-            var vbs = Path.Combine(AppContext.BaseDirectory, "Start SteadyDim.vbs");
-            if (File.Exists(vbs))
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = "wscript.exe",
-                    Arguments = $"\"{vbs}\" /restart",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                });
-            }
-            else
-            {
-                var command = AppInfo.StartupCommand;
-                var arguments = AppInfo.IsDotnetHosted
-                    ? $"\"{AppInfo.EntryAssemblyPath}\" --restart"
-                    : "--restart";
-
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = $"/c timeout /t 3 /nobreak >nul & start \"\" \"{command}\" {arguments}",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Error("Could not launch the restart helper.", ex);
-        }
-
-        ExitAppCore(restarting: true);
-    }
-
     private void ExitApp()
-    {
-        ExitAppCore(restarting: false);
-    }
-
-    private void ExitAppCore(bool restarting)
     {
         if (_exiting)
         {
@@ -389,7 +308,7 @@ internal sealed class TrayApp : ApplicationContext
         }
 
         _exiting = true;
-        Log.Info(restarting ? "Exiting for restart." : "Exit requested.");
+        Log.Info("Exit requested.");
 
         try
         {

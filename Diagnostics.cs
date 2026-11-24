@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace SteadyDim;
@@ -18,30 +17,6 @@ internal static class Diagnostics
         builder.AppendLine($"Config: {AppInfo.ConfigPath}");
         builder.AppendLine();
 
-        try
-        {
-            var magInitialized = Native.MagInitialize();
-            builder.AppendLine($"MagInitialize: {magInitialized} (Win32 {Marshal.GetLastWin32Error()})");
-
-            if (magInitialized)
-            {
-                var effect = new Native.MAGCOLOREFFECT { transform = new float[25] };
-                var read = Native.MagGetFullscreenColorEffect(ref effect);
-                builder.AppendLine($"MagGetFullscreenColorEffect: {read} (Win32 {Marshal.GetLastWin32Error()})");
-                if (read)
-                {
-                    builder.AppendLine($"  current RGB scale: {effect.transform[0]:0.000}, {effect.transform[6]:0.000}, {effect.transform[12]:0.000}");
-                }
-
-                // Deliberately do not call MagUninitialize; process exit is enough.
-            }
-        }
-        catch (Exception ex)
-        {
-            builder.AppendLine("Magnification diagnostic failed: " + ex);
-        }
-
-        builder.AppendLine();
         builder.AppendLine("Displays:");
 
         try
