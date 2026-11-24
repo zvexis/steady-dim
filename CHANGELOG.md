@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1 — 2026-11-24
+
+- Replaced the three one-second Magnification retries with persistent backoff
+  retries (1s, 2s, 4s, 8s, 16s, then every 30s).
+- Added a 10-second Magnification signature watchdog that reapplies the effect
+  if it disappears without a setting change.
+- Request a process restart after 10 consecutive Magnification failures.
+- Added **Repair deep dim** to the tray menu.
+
 ## 1.1.0 — 2026-11-19
 
 - Swapped the panel layout: one shared DDC hardware-brightness slider for all

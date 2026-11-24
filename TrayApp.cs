@@ -74,7 +74,8 @@ internal sealed class TrayApp : ApplicationContext
 
         _controller.MonitorsChanged += (_, _) => Post(UpdateMenu);
         _controller.StateChanged += (_, _) => Post(UpdateMenu);
-        _controller.TopologyChanged += (_, _) => Post(RestartForTopologyChange);
+        _controller.TopologyChanged += (_, _) => Post(() => RestartApp("display topology change"));
+        _controller.MagRecoveryRequested += (_, _) => Post(() => RestartApp("persistent Magnification failure"));
 
         _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, AppInfo.ShowEventName);
         _showWait = ThreadPool.RegisterWaitForSingleObject(
@@ -160,6 +161,9 @@ internal sealed class TrayApp : ApplicationContext
         var rescan = new ToolStripMenuItem("Rescan displays");
         rescan.Click += (_, _) => _controller.ScheduleRescan("manual tray rescan", 0);
 
+        var repair = new ToolStripMenuItem("Repair deep dim");
+        repair.Click += (_, _) => _controller.RepairDeepDim();
+
         var reset = new ToolStripMenuItem("Reset to full brightness");
         reset.Click += (_, _) =>
         {
@@ -178,6 +182,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(deepDimItem);
         menu.Items.Add(startupItem);
         menu.Items.Add(rescan);
+        menu.Items.Add(repair);
         menu.Items.Add(reset);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(log);
@@ -324,7 +329,7 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
-    private void RestartForTopologyChange()
+    private void RestartApp(string reason)
     {
         if (_exiting || _restarting)
         {
@@ -332,7 +337,7 @@ internal sealed class TrayApp : ApplicationContext
         }
 
         _restarting = true;
-        Log.Info("Restarting SteadyDim after display topology change.");
+        Log.Info("Restarting SteadyDim: " + reason + ".");
 
         try
         {

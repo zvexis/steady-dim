@@ -45,6 +45,8 @@ SteadyDim avoids that architecture:
 - Automatic app restart after a display-topology change, so the compositor
   deep-dim layer is freshly initialized.
 - Retries DDC operations and verifies the brightness readback.
+- Persistent deep-dim retries with backoff, plus a watchdog that reapplies the
+  effect if it disappears; a process restart is the last resort.
 - Scheduled task at logon with a **10 second delay** and restart-on-failure.
 - Portable settings and logs in `data\`.
 - No driver, Windows service, or administrator rights.
@@ -94,6 +96,7 @@ Tray menu:
 - Deep night dim
 - Start at logon
 - Rescan displays
+- Repair deep dim
 - Reset to full brightness
 - Open log
 - Exit
@@ -149,6 +152,8 @@ dotnet SteadyDim.dll --diagnose
   trusted/excluded files.
 - **A monitor is missing.** Enable DDC/CI in its OSD, check the cable/adapter,
   then use the tray menu or restart the app so it rescans.
+- **Deep dim stops after wake/display changes.** The app retries automatically;
+  if it does not recover, use **Repair deep dim** in the tray menu.
 - **The screen is too dark.** Use the tray menu **Reset to full brightness**, or
   run `--reset`.
 - **Something failed.** Check `data\steadydim.log` and run `--diagnose`.
@@ -180,7 +185,7 @@ Create an empty GitHub repository, then push `main` and the tag:
 ```powershell
 git remote add origin https://github.com/<owner>/steady-dim.git
 git push -u origin main
-git push origin v1.1.0
+git push origin v1.1.1
 ```
 
 The tag push builds the release on GitHub. You can also attach the locally built

@@ -9,9 +9,9 @@
     <AssemblyName>SteadyDim</AssemblyName>
     <RootNamespace>SteadyDim</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.1.1</Version>
+    <AssemblyVersion>1.1.1.0</AssemblyVersion>
+    <FileVersion>1.1.1.0</FileVersion>
     <Authors>SteadyDim contributors</Authors>
     <Product>SteadyDim</Product>
     <Description>Reliable per-monitor DDC/CI brightness with a compositor-level deep-night dimmer for Windows.</Description>

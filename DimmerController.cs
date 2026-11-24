@@ -43,6 +43,7 @@ internal sealed class DimmerController : IDisposable
     private bool _savePending;
     private float? _lastMagScale;
     private int _magRetryAttempts;
+    private bool _magRecoveryRequested;
     private string _topologySignature = "";
     private DateTime _lastWatchdogRescan = DateTime.MinValue;
 
@@ -78,6 +79,8 @@ internal sealed class DimmerController : IDisposable
 
         try
         {
+            VerifyMagEffect();
+
             var expected = Native.GetSystemMetrics(Native.SM_CMONITORS);
             List<MonitorState> snapshot;
             lock (_stateGate)
@@ -110,6 +113,7 @@ internal sealed class DimmerController : IDisposable
     public event EventHandler? MonitorsChanged;
     public event EventHandler? StateChanged;
     public event EventHandler? TopologyChanged;
+    public event EventHandler? MagRecoveryRequested;
 
     public AppConfig Config => _config;
     public bool DeepDimAvailable { get; private set; } = true;
@@ -695,6 +699,19 @@ internal sealed class DimmerController : IDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void RepairDeepDim()
+    {
+        lock (_magGate)
+        {
+            _lastMagScale = null;
+            _magRetryAttempts = 0;
+            _magRecoveryRequested = false;
+        }
+
+        Log.Info("Manual Magnification repair requested.");
+        ApplyMag();
+    }
+
     public void SetDeepDimEnabled(bool enabled)
     {
         _config.DeepDimEnabled = enabled;
@@ -746,12 +763,13 @@ internal sealed class DimmerController : IDisposable
                 return;
             }
 
+            var scale = (float)(1.0 - _config.DeepDimPercent / 100.0);
             if (!EnsureMagInitialized())
             {
+                ScheduleMagRetry(scale, 21);
                 return;
             }
 
-            var scale = (float)(1.0 - _config.DeepDimPercent / 100.0);
             SetMagEffect(scale);
         }
     }
@@ -793,27 +811,25 @@ internal sealed class DimmerController : IDisposable
         if (_lastMagScale is { } last && Math.Abs(last - scale) < 0.001f)
         {
             _magRetryAttempts = 0;
+            _magRecoveryRequested = false;
             return true;
         }
 
-        if (TryApplyMagEffect(scale))
+        if (TryApplyMagEffect(scale, out var error))
         {
+            _lastMagScale = scale;
+            _magRetryAttempts = 0;
+            _magRecoveryRequested = false;
+            Log.Info($"Mag effect scale={scale:0.00} ({(1 - scale) * 100:0}% reduction).");
             return true;
         }
 
         _lastMagScale = null;
-
-        if (!_disposed && _magRetryAttempts < 3)
-        {
-            _magRetryAttempts++;
-            _magRetryTimer.Change(1000, Timeout.Infinite);
-            Log.Info($"Scheduling Mag retry {_magRetryAttempts}/3.");
-        }
-
+        ScheduleMagRetry(scale, error);
         return false;
     }
 
-    private bool TryApplyMagEffect(float scale)
+    private bool TryApplyMagEffect(float scale, out int error)
     {
         var effect = new Native.MAGCOLOREFFECT
         {
@@ -830,20 +846,115 @@ internal sealed class DimmerController : IDisposable
         {
             if (Native.MagSetFullscreenColorEffect(ref effect))
             {
-                _lastMagScale = scale;
-                _magRetryAttempts = 0;
-                Log.Info($"Mag effect scale={scale:0.00} ({(1 - scale) * 100:0}% reduction).");
+                error = 0;
                 return true;
             }
 
-            var error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-            Log.Warn($"MagSetFullscreenColorEffect failed (Win32 {error}) at scale {scale:0.00}.");
+            error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
             return false;
         }
         catch (Exception ex)
         {
+            error = -1;
             Log.Warn("MagSetFullscreenColorEffect threw: " + ex.Message);
             return false;
+        }
+    }
+
+    private void ScheduleMagRetry(float scale, int error)
+    {
+        if (_disposed || _magRecoveryRequested)
+        {
+            return;
+        }
+
+        _magRetryAttempts++;
+
+        if (_magRetryAttempts >= 10)
+        {
+            RequestMagRecovery($"persistent Magnification failure (Win32 {error})");
+            return;
+        }
+
+        var delayMs = _magRetryAttempts switch
+        {
+            1 => 1000,
+            2 => 2000,
+            3 => 4000,
+            4 => 8000,
+            5 => 16000,
+            _ => 30000
+        };
+
+        _magRetryTimer.Change(delayMs, Timeout.Infinite);
+
+        if (_magRetryAttempts == 1 || _magRetryAttempts % 5 == 0)
+        {
+            Log.Warn($"MagSetFullscreenColorEffect failed (Win32 {error}) at scale {scale:0.00}; retry {_magRetryAttempts} in {delayMs / 1000}s.");
+        }
+    }
+
+    private void RequestMagRecovery(string reason)
+    {
+        if (_magRecoveryRequested || _disposed)
+        {
+            return;
+        }
+
+        _magRecoveryRequested = true;
+        Log.Warn("Requesting process restart for Magnification recovery: " + reason);
+        MagRecoveryRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void VerifyMagEffect()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        var shouldDim = _config.DeepDimEnabled &&
+                        _config.DeepDimPercent > 0 &&
+                        !(_panelOpen && _config.PauseDeepDimWhilePanelOpen);
+
+        var desired = shouldDim ? (float)(1.0 - _config.DeepDimPercent / 100.0) : 1.0f;
+
+        float? cached;
+        lock (_magGate)
+        {
+            cached = _lastMagScale;
+        }
+
+        if (cached is null || Math.Abs(cached.Value - desired) > 0.001f)
+        {
+            ApplyMag();
+            return;
+        }
+
+        var effect = new Native.MAGCOLOREFFECT
+        {
+            transform = new float[25]
+        };
+
+        try
+        {
+            if (!Native.MagGetFullscreenColorEffect(ref effect) ||
+                Math.Abs(effect.transform[0] - desired) > 0.001f ||
+                Math.Abs(effect.transform[6] - desired) > 0.001f ||
+                Math.Abs(effect.transform[12] - desired) > 0.001f)
+            {
+                Log.Warn("Mag effect is missing or mismatched; reapplying.");
+                lock (_magGate)
+                {
+                    _lastMagScale = null;
+                }
+
+                ApplyMag();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Mag signature check failed: " + ex.Message);
         }
     }
 
