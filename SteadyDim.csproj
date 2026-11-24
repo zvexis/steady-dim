@@ -9,12 +9,12 @@
     <AssemblyName>SteadyDim</AssemblyName>
     <RootNamespace>SteadyDim</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Version>1.2.0</Version>
-    <AssemblyVersion>1.2.0.0</AssemblyVersion>
-    <FileVersion>1.2.0.0</FileVersion>
+    <Version>2.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
     <Authors>SteadyDim contributors</Authors>
     <Product>SteadyDim</Product>
-    <Description>Shared hardware brightness and per-monitor gamma for Windows.</Description>
+    <Description>Combined hardware and software dimming for Windows.</Description>
     <Copyright>Copyright (c) 2026 SteadyDim contributors</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <ApplicationIcon>Assets\SteadyDim.ico</ApplicationIcon>
@@ -30,5 +30,6 @@
   </ItemGroup>
 
 </Project>
+
 
 

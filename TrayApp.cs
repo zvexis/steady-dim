@@ -245,7 +245,8 @@ internal sealed class TrayApp : ApplicationContext
     private void UpdateMenu()
     {
         _startupItem.Checked = _config.StartWithWindows;
-        _tray.Text = "SteadyDim";
+        var text = $"SteadyDim — {Math.Clamp(_config.Level, 0, 100)}%";
+        _tray.Text = text.Length <= 63 ? text : text[..63];
     }
 
     private void RestoreTrayIcon()

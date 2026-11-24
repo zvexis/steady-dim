@@ -10,6 +10,26 @@ internal static class Recovery
 
         try
         {
+            if (Native.MagInitialize())
+            {
+                var identity = new Native.MAGCOLOREFFECT { transform = new float[25] };
+                identity.transform[0] = 1.0f;
+                identity.transform[6] = 1.0f;
+                identity.transform[12] = 1.0f;
+                identity.transform[18] = 1.0f;
+                identity.transform[24] = 1.0f;
+
+                var set = Native.MagSetFullscreenColorEffect(ref identity);
+                Log.Info($"Recovery software dim cleared: {set} (Win32 {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Recovery could not reset software dim.", ex);
+        }
+
+        try
+        {
             var displays = DisplayEnumerator.Enumerate();
             foreach (var display in displays)
             {
@@ -51,14 +71,7 @@ internal static class Recovery
         try
         {
             var config = ConfigStore.Load();
-            config.SharedHardwareBrightness = 100;
-            config.GammaMaster = 0;
-            foreach (var monitor in config.Monitors.Values)
-            {
-                monitor.Brightness = 100;
-                monitor.GammaTrim = 0;
-            }
-
+            config.Level = 0;
             ConfigStore.Save(config);
             Log.Info("Recovery config reset.");
         }

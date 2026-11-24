@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text.Json;
 
 namespace SteadyDim;
@@ -9,16 +8,19 @@ namespace SteadyDim;
 internal sealed class MonitorConfig
 {
     public string Name { get; set; } = "";
-    public int Brightness { get; set; } = 50;
-    public int GammaTrim { get; set; }
 }
 
 internal sealed class AppConfig
 {
-    public int SchemaVersion { get; set; } = 3;
+    public int SchemaVersion { get; set; } = 4;
+
+    /// <summary>
+    /// 0–50 maps hardware brightness 100→0%.
+    /// 50–100 maps software dim 0→90%.
+    /// </summary>
+    public int Level { get; set; } = 50;
+
     public bool StartWithWindows { get; set; } = true;
-    public int? SharedHardwareBrightness { get; set; }
-    public int? GammaMaster { get; set; }
     public Dictionary<string, MonitorConfig> Monitors { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     [System.Text.Json.Serialization.JsonIgnore]
@@ -97,30 +99,12 @@ internal static class ConfigStore
 
     private static void Normalize(AppConfig config)
     {
-        config.SchemaVersion = 3;
+        config.SchemaVersion = 4;
+        config.Level = Math.Clamp(config.Level, 0, 100);
         config.Monitors ??= new Dictionary<string, MonitorConfig>(StringComparer.OrdinalIgnoreCase);
-        config.GammaMaster = Math.Clamp(
-            config.GammaMaster ?? (config.Monitors.Count > 0 ? config.Monitors.Values.Max(m => m.GammaTrim) : 0),
-            0,
-            50);
-
-        if (config.SharedHardwareBrightness is null)
-        {
-            var values = config.Monitors.Values
-                .Select(m => Math.Clamp(m.Brightness, 0, 100))
-                .ToList();
-
-            config.SharedHardwareBrightness = values.Count > 0
-                ? (int)Math.Round(values.Average())
-                : 50;
-        }
-
-        config.SharedHardwareBrightness = Math.Clamp(config.SharedHardwareBrightness.Value, 0, 100);
 
         foreach (var pair in config.Monitors)
         {
-            pair.Value.Brightness = config.SharedHardwareBrightness.Value;
-            pair.Value.GammaTrim = Math.Clamp(pair.Value.GammaTrim, 0, 50);
             pair.Value.Name ??= "";
         }
     }

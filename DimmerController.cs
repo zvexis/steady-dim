@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -16,18 +17,15 @@ internal sealed class MonitorState
     public uint DdcMaximum { get; init; }
     public int TargetPercent { get; set; }
     public int CurrentPercent { get; set; }
-    public int GammaTrim { get; set; }
-    public bool GammaAvailable { get; init; }
     public string? DdcError { get; set; }
-    public string? GammaError { get; set; }
     internal DisplayInfo Display { get; init; } = null!;
 }
 
 internal sealed class DimmerController : IDisposable
 {
     private readonly object _stateGate = new();
+    private readonly object _magGate = new();
     private readonly SemaphoreSlim _ddcGate = new(1, 1);
-    private readonly SemaphoreSlim _gammaGate = new(1, 1);
     private readonly AppConfig _config;
     private readonly System.Threading.Timer _saveTimer;
     private readonly System.Threading.Timer _watchdogTimer;
@@ -37,6 +35,7 @@ internal sealed class DimmerController : IDisposable
     private CancellationTokenSource? _pendingRescan;
     private bool _disposed;
     private bool _savePending;
+    private bool _magInitialized;
     private DateTime _lastWatchdogRescan = DateTime.MinValue;
 
     public DimmerController(AppConfig config)
@@ -50,6 +49,19 @@ internal sealed class DimmerController : IDisposable
     public event EventHandler? StateChanged;
 
     public AppConfig Config => _config;
+    public int Level => Math.Clamp(_config.Level, 0, 100);
+
+    public static int HardwarePercentForLevel(int level)
+    {
+        level = Math.Clamp(level, 0, 100);
+        return level <= 50 ? 100 - level * 2 : 0;
+    }
+
+    public static int SoftwarePercentForLevel(int level)
+    {
+        level = Math.Clamp(level, 0, 100);
+        return level <= 50 ? 0 : (int)Math.Round((level - 50) * 1.8);
+    }
 
     public IReadOnlyList<MonitorState> GetMonitors()
     {
@@ -83,7 +95,7 @@ internal sealed class DimmerController : IDisposable
             ScheduleRescan("startup DDC retry", 1500);
         }
 
-        // Persist schema migration and the derived gamma master once at startup.
+        ApplyMag(SoftwarePercentForLevel(Level));
         QueueSave();
     }
 
@@ -172,32 +184,23 @@ internal sealed class DimmerController : IDisposable
             }
 
             List<DisplayInfo> oldDisplays;
-            List<MonitorState> oldStates;
             lock (_stateGate)
             {
                 oldDisplays = _displays;
-                oldStates = _monitors;
                 _displays = new List<DisplayInfo>();
                 _monitors = new List<MonitorState>();
             }
 
-            var oldByDevice = oldStates
-                .Where(s => !string.IsNullOrWhiteSpace(s.DeviceName))
-                .GroupBy(s => s.DeviceName, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-
             foreach (var old in oldDisplays)
             {
-                // Keep gamma applied across DDC-only rescans; transfer the
-                // baseline and applied state to the new DisplayInfo below.
-                old.Dispose(restoreGamma: false);
+                old.Dispose();
             }
 
             var newDisplays = DisplayEnumerator.Enumerate();
             var newStates = new List<MonitorState>();
             var anyDdc = false;
             var configChanged = false;
-            var shared = Math.Clamp(_config.SharedHardwareBrightness ?? 50, 0, 100);
+            var hardware = HardwarePercentForLevel(Level);
 
             foreach (var display in newDisplays)
             {
@@ -206,14 +209,8 @@ internal sealed class DimmerController : IDisposable
                     monitorConfig = FindByName(display.Name);
                     if (monitorConfig is null)
                     {
-                        monitorConfig = new MonitorConfig
-                        {
-                            Name = display.Name,
-                            Brightness = shared,
-                            GammaTrim = 0
-                        };
-
-                        Log.Info($"New monitor discovered: {display.Name} ({display.Id}); default DDC {shared}%, gamma 0%.");
+                        monitorConfig = new MonitorConfig { Name = display.Name };
+                        Log.Info($"New monitor discovered: {display.Name} ({display.Id}).");
                     }
 
                     _config.Monitors[display.Id] = monitorConfig;
@@ -226,20 +223,6 @@ internal sealed class DimmerController : IDisposable
                     configChanged = true;
                 }
 
-                monitorConfig.Brightness = shared;
-                var gammaTrim = Math.Clamp(monitorConfig.GammaTrim, 0, 50);
-                oldByDevice.TryGetValue(display.DeviceName, out var oldState);
-
-                var gammaNeedsApply = oldState is null ||
-                                      oldState.GammaTrim != gammaTrim ||
-                                      (gammaTrim > 0 && !oldState.Display.GammaApplied);
-
-                if (oldState is not null)
-                {
-                    display.OriginalGammaRamp = oldState.Display.OriginalGammaRamp;
-                    display.GammaApplied = oldState.Display.GammaApplied;
-                }
-
                 var state = new MonitorState
                 {
                     Id = display.Id,
@@ -248,19 +231,17 @@ internal sealed class DimmerController : IDisposable
                     DdcAvailable = display.DdcAvailable,
                     DdcMinimum = display.DdcMinimum,
                     DdcMaximum = display.DdcMaximum,
-                    TargetPercent = shared,
+                    TargetPercent = hardware,
                     CurrentPercent = PercentFromRaw(display, display.DdcCurrent),
-                    GammaTrim = gammaTrim,
-                    GammaAvailable = display.GammaAvailable,
                     Display = display
                 };
 
-                Log.Info($"Display state: {display.Name}; id={display.Id}; device={display.DeviceName}; ddc={display.DdcAvailable}; gamma={display.GammaAvailable}; gammaApplied={display.GammaApplied}; handle=0x{display.DdcHandle.ToInt64():X}.");
+                Log.Info($"Display state: {display.Name}; id={display.Id}; device={display.DeviceName}; ddc={display.DdcAvailable}; handle=0x{display.DdcHandle.ToInt64():X}.");
 
                 if (display.DdcAvailable)
                 {
                     anyDdc = true;
-                    var applied = await ApplyDdcCoreAsync(display, shared).ConfigureAwait(false);
+                    var applied = await ApplyDdcCoreAsync(display, hardware).ConfigureAwait(false);
                     if (!applied)
                     {
                         state.DdcError = "DDC write failed";
@@ -271,18 +252,6 @@ internal sealed class DimmerController : IDisposable
                 else
                 {
                     state.DdcError = "DDC unavailable";
-                }
-
-                if (gammaNeedsApply)
-                {
-                    var gammaApplied = ApplyGammaCore(display, gammaTrim);
-                    state.GammaError = gammaApplied
-                        ? null
-                        : (display.GammaAvailable ? "Gamma rejected" : "Gamma unavailable");
-                }
-                else
-                {
-                    state.GammaError = oldState?.GammaError;
                 }
 
                 newStates.Add(state);
@@ -299,7 +268,7 @@ internal sealed class DimmerController : IDisposable
                 QueueSave();
             }
 
-            Log.Info($"Rescan complete: {newStates.Count} display(s), DDC available on {newStates.Count(s => s.DdcAvailable)}, gamma available on {newStates.Count(s => s.GammaAvailable)}.");
+            Log.Info($"Rescan complete: {newStates.Count} display(s), DDC available on {newStates.Count(s => s.DdcAvailable)}.");
             MonitorsChanged?.Invoke(this, EventArgs.Empty);
             StateChanged?.Invoke(this, EventArgs.Empty);
             return anyDdc;
@@ -323,29 +292,27 @@ internal sealed class DimmerController : IDisposable
         return null;
     }
 
-    public void SetAllHardwareBrightness(int percent)
+    public void SetLevel(int level)
     {
-        percent = Math.Clamp(percent, 0, 100);
-        _config.SharedHardwareBrightness = percent;
+        level = Math.Clamp(level, 0, 100);
+        _config.Level = level;
+
+        var hardware = HardwarePercentForLevel(level);
+        var software = SoftwarePercentForLevel(level);
 
         foreach (var monitor in GetMonitors())
         {
-            monitor.TargetPercent = percent;
+            monitor.TargetPercent = hardware;
             monitor.DdcError = null;
-
-            if (_config.Monitors.TryGetValue(monitor.Id, out var monitorConfig))
-            {
-                monitorConfig.Name = monitor.Name;
-                monitorConfig.Brightness = percent;
-            }
         }
 
-        Log.Info($"Shared hardware brightness request: all monitors -> {percent}%.");
+        Log.Info($"Level {level}%: hardware {hardware}%, software {software}%.");
         QueueSave();
-        _ = ApplyAllHardwareAsync(percent);
+        StateChanged?.Invoke(this, EventArgs.Empty);
+        _ = ApplyLevelAsync(hardware, software);
     }
 
-    private async Task ApplyAllHardwareAsync(int percent)
+    private async Task ApplyLevelAsync(int hardware, int software)
     {
         await _ddcGate.WaitAsync().ConfigureAwait(false);
         try
@@ -364,7 +331,7 @@ internal sealed class DimmerController : IDisposable
                     continue;
                 }
 
-                var applied = await ApplyDdcCoreAsync(current.Display, percent).ConfigureAwait(false);
+                var applied = await ApplyDdcCoreAsync(current.Display, hardware).ConfigureAwait(false);
                 current.CurrentPercent = PercentFromRaw(current.Display, current.Display.DdcCurrent);
                 current.DdcError = applied ? null : "DDC write failed";
             }
@@ -373,224 +340,95 @@ internal sealed class DimmerController : IDisposable
         }
         catch (Exception ex)
         {
-            Log.Error("Set shared hardware brightness failed.", ex);
-            StateChanged?.Invoke(this, EventArgs.Empty);
+            Log.Error("Apply level failed.", ex);
         }
         finally
         {
             _ddcGate.Release();
         }
+
+        ApplyMag(software);
     }
 
-    public void SetAllGammaTrim(int percent)
+    private bool EnsureMagInitialized()
     {
-        percent = Math.Clamp(percent, 0, 50);
-        _config.GammaMaster = percent;
-
-        foreach (var monitor in GetMonitors())
+        if (_magInitialized)
         {
-            monitor.GammaTrim = percent;
-            monitor.GammaError = null;
-
-            if (_config.Monitors.TryGetValue(monitor.Id, out var monitorConfig))
-            {
-                monitorConfig.Name = monitor.Name;
-                monitorConfig.GammaTrim = percent;
-            }
+            return true;
         }
 
-        Log.Info($"Master gamma request: all monitors -> {percent}%.");
-        QueueSave();
-        _ = ApplyAllGammaAsync(percent);
-    }
-
-    private async Task ApplyAllGammaAsync(int percent)
-    {
-        await _gammaGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (_disposed)
+            if (Native.MagInitialize())
             {
-                return;
-            }
-
-            var ids = GetMonitors().Select(m => m.Id).ToList();
-            foreach (var id in ids)
-            {
-                var current = FindMonitor(id);
-                if (current is null)
-                {
-                    continue;
-                }
-
-                var applied = ApplyGammaCore(current.Display, percent);
-                current.GammaTrim = percent;
-                current.GammaError = applied
-                    ? null
-                    : (current.GammaAvailable ? "Gamma rejected" : "Gamma unavailable");
-            }
-
-            StateChanged?.Invoke(this, EventArgs.Empty);
-        }
-        catch (Exception ex)
-        {
-            Log.Error("Set master gamma failed.", ex);
-            StateChanged?.Invoke(this, EventArgs.Empty);
-        }
-        finally
-        {
-            _gammaGate.Release();
-        }
-    }
-
-    public void SetGammaTrim(string id, int percent)
-    {
-        percent = Math.Clamp(percent, 0, 50);
-        var state = FindMonitor(id);
-        if (state is null)
-        {
-            Log.Warn($"Gamma request for unknown monitor id '{id}'.");
-            return;
-        }
-
-        state.GammaTrim = percent;
-        state.GammaError = null;
-
-        if (!_config.Monitors.TryGetValue(id, out var monitorConfig))
-        {
-            monitorConfig = new MonitorConfig
-            {
-                Name = state.Name,
-                Brightness = _config.SharedHardwareBrightness ?? state.TargetPercent
-            };
-            _config.Monitors[id] = monitorConfig;
-        }
-
-        monitorConfig.Name = state.Name;
-        monitorConfig.GammaTrim = percent;
-
-        Log.Info($"Gamma trim request: {state.Name} ({id}) -> {percent}%.");
-        QueueSave();
-        _ = ApplyGammaForStateAsync(state, percent);
-    }
-
-    private async Task ApplyGammaForStateAsync(MonitorState state, int percent)
-    {
-        await _gammaGate.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            var current = FindMonitor(state.Id);
-            if (current is null)
-            {
-                return;
-            }
-
-            var applied = ApplyGammaCore(current.Display, percent);
-            current.GammaTrim = percent;
-            current.GammaError = applied
-                ? null
-                : (current.GammaAvailable ? "Gamma rejected" : "Gamma unavailable");
-
-            StateChanged?.Invoke(this, EventArgs.Empty);
-        }
-        catch (Exception ex)
-        {
-            Log.Error("Set gamma trim failed for " + state.Name, ex);
-            StateChanged?.Invoke(this, EventArgs.Empty);
-        }
-        finally
-        {
-            _gammaGate.Release();
-        }
-    }
-
-    private static bool ApplyGammaCore(DisplayInfo display, int trim)
-    {
-        if (!display.GammaAvailable || display.GammaDc == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        trim = Math.Clamp(trim, 0, 50);
-
-        if (trim == 0)
-        {
-            if (!display.GammaApplied)
-            {
+                _magInitialized = true;
+                Log.Info("Magnification API initialized for software dim.");
                 return true;
             }
 
-            var restored = display.OriginalGammaRamp is not null &&
-                           SetGammaVerified(display, display.OriginalGammaRamp, "restore", logSuccess: false);
-
-            if (restored)
-            {
-                display.GammaApplied = false;
-            }
-
-            return restored;
-        }
-
-        var factor = 1.0 - trim / 100.0;
-        var ramp = new ushort[768];
-        for (var i = 0; i < 256; i++)
-        {
-            var value = (ushort)Math.Round(i * 257.0 * factor);
-            ramp[i] = value;
-            ramp[256 + i] = value;
-            ramp[512 + i] = value;
-        }
-
-        var applied = SetGammaVerified(display, ramp, $"{trim}% trim", logSuccess: true);
-        if (applied)
-        {
-            display.GammaApplied = true;
-        }
-
-        return applied;
-    }
-
-    private static bool SetGammaVerified(DisplayInfo display, ushort[] ramp, string label, bool logSuccess)
-    {
-        try
-        {
-            if (!Native.SetDeviceGammaRamp(display.GammaDc, ramp))
-            {
-                Log.Warn($"SetDeviceGammaRamp failed for {display.Name} ({label}).");
-                return false;
-            }
-
-            var check = new ushort[768];
-            if (!Native.GetDeviceGammaRamp(display.GammaDc, check))
-            {
-                Log.Warn($"Gamma readback unavailable for {display.Name} ({label}).");
-                return false;
-            }
-
-            var whiteDelta = Math.Abs((int)check[255] - ramp[255]);
-            var midDelta = Math.Abs((int)check[128] - ramp[128]);
-            if (whiteDelta > 1024 || midDelta > 1024)
-            {
-                Log.Warn($"Gamma readback mismatch for {display.Name} ({label}): white={check[255]} target={ramp[255]}.");
-                return false;
-            }
-
-            if (logSuccess)
-            {
-                Log.Info($"Gamma {display.Name}: {label}, white={check[255]}.");
-            }
-
-            return true;
+            var error = Marshal.GetLastWin32Error();
+            Log.Warn($"MagInitialize failed (Win32 {error}). Software dim is unavailable.");
         }
         catch (Exception ex)
         {
-            Log.Warn($"Gamma apply threw for {display.Name}: {ex.Message}");
-            return false;
+            Log.Warn("MagInitialize threw: " + ex.Message);
+        }
+
+        return false;
+    }
+
+    private void ApplyMag(int reduction)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        lock (_magGate)
+        {
+            if (reduction <= 0)
+            {
+                if (!EnsureMagInitialized())
+                {
+                    return;
+                }
+
+                var identity = new Native.MAGCOLOREFFECT { transform = new float[25] };
+                identity.transform[0] = 1.0f;
+                identity.transform[6] = 1.0f;
+                identity.transform[12] = 1.0f;
+                identity.transform[18] = 1.0f;
+                identity.transform[24] = 1.0f;
+
+                if (!Native.MagSetFullscreenColorEffect(ref identity))
+                {
+                    Log.Warn($"Mag identity reset failed (Win32 {Marshal.GetLastWin32Error()}).");
+                }
+
+                return;
+            }
+
+            if (!EnsureMagInitialized())
+            {
+                return;
+            }
+
+            var scale = Math.Clamp(1.0f - reduction / 100.0f, 0.10f, 1.0f);
+            var effect = new Native.MAGCOLOREFFECT { transform = new float[25] };
+            effect.transform[0] = scale;
+            effect.transform[6] = scale;
+            effect.transform[12] = scale;
+            effect.transform[18] = 1.0f;
+            effect.transform[24] = 1.0f;
+
+            if (Native.MagSetFullscreenColorEffect(ref effect))
+            {
+                Log.Info($"Software dim {reduction}% (scale={scale:0.00}).");
+            }
+            else
+            {
+                Log.Warn($"MagSetFullscreenColorEffect failed (Win32 {Marshal.GetLastWin32Error()}) at {reduction}% software dim.");
+            }
         }
     }
 
@@ -680,30 +518,7 @@ internal sealed class DimmerController : IDisposable
 
     public void ResetToFull()
     {
-        var monitors = GetMonitors();
-        _config.SharedHardwareBrightness = 100;
-        _config.GammaMaster = 0;
-
-        foreach (var monitor in monitors)
-        {
-            monitor.TargetPercent = 100;
-            monitor.GammaTrim = 0;
-            monitor.DdcError = null;
-            monitor.GammaError = null;
-
-            _config.Monitors[monitor.Id] = new MonitorConfig
-            {
-                Name = monitor.Name,
-                Brightness = 100,
-                GammaTrim = 0
-            };
-
-            _ = ApplyGammaForStateAsync(monitor, 0);
-        }
-
-        QueueSave();
-        _ = ApplyAllHardwareAsync(100);
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        SetLevel(0);
     }
 
     private void WatchdogTick()
@@ -803,7 +618,6 @@ internal sealed class DimmerController : IDisposable
 
         ConfigStore.Save(_config);
         _ddcGate.Dispose();
-        _gammaGate.Dispose();
         Log.Info("DimmerController disposed.");
     }
 }

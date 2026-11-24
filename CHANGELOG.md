@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.0 — 2026-11-24
+
+- Replaced the separate hardware and gamma controls with one 0–100% slider:
+  - 0–50% maps shared DDC hardware brightness 100→0%.
+  - 50–100% maps global software dim 0→90%.
+- Removed per-monitor gamma trim and its master slider.
+- Software dim uses the Magnification layer with no watchdog and no automatic
+  process restarts.
+- Settings schema 4; the single `Level` value replaces hardware/gamma settings.
+
 ## 1.2.0 — 2026-11-24
 
 - Removed the global Magnification deep-dim layer, its watchdog, and all
