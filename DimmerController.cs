@@ -49,19 +49,6 @@ internal sealed class DimmerController : IDisposable
     public event EventHandler? StateChanged;
 
     public AppConfig Config => _config;
-    public int Level => Math.Clamp(_config.Level, 0, 100);
-
-    public static int HardwarePercentForLevel(int level)
-    {
-        level = Math.Clamp(level, 0, 100);
-        return level <= 50 ? 100 - level * 2 : 0;
-    }
-
-    public static int SoftwarePercentForLevel(int level)
-    {
-        level = Math.Clamp(level, 0, 100);
-        return level <= 50 ? 0 : (int)Math.Round((level - 50) * 1.8);
-    }
 
     public IReadOnlyList<MonitorState> GetMonitors()
     {
@@ -95,7 +82,7 @@ internal sealed class DimmerController : IDisposable
             ScheduleRescan("startup DDC retry", 1500);
         }
 
-        ApplyMag(SoftwarePercentForLevel(Level));
+        ApplyMag(_config.SoftwarePercent);
         QueueSave();
     }
 
@@ -200,7 +187,6 @@ internal sealed class DimmerController : IDisposable
             var newStates = new List<MonitorState>();
             var anyDdc = false;
             var configChanged = false;
-            var hardware = HardwarePercentForLevel(Level);
 
             foreach (var display in newDisplays)
             {
@@ -209,8 +195,13 @@ internal sealed class DimmerController : IDisposable
                     monitorConfig = FindByName(display.Name);
                     if (monitorConfig is null)
                     {
-                        monitorConfig = new MonitorConfig { Name = display.Name };
-                        Log.Info($"New monitor discovered: {display.Name} ({display.Id}).");
+                        monitorConfig = new MonitorConfig
+                        {
+                            Name = display.Name,
+                            Brightness = _config.HardwareMaster
+                        };
+
+                        Log.Info($"New monitor discovered: {display.Name} ({display.Id}); default DDC {monitorConfig.Brightness}%.");
                     }
 
                     _config.Monitors[display.Id] = monitorConfig;
@@ -223,6 +214,9 @@ internal sealed class DimmerController : IDisposable
                     configChanged = true;
                 }
 
+                monitorConfig.Brightness = Math.Clamp(monitorConfig.Brightness, 0, 100);
+                var target = monitorConfig.Brightness;
+
                 var state = new MonitorState
                 {
                     Id = display.Id,
@@ -231,17 +225,17 @@ internal sealed class DimmerController : IDisposable
                     DdcAvailable = display.DdcAvailable,
                     DdcMinimum = display.DdcMinimum,
                     DdcMaximum = display.DdcMaximum,
-                    TargetPercent = hardware,
+                    TargetPercent = target,
                     CurrentPercent = PercentFromRaw(display, display.DdcCurrent),
                     Display = display
                 };
 
-                Log.Info($"Display state: {display.Name}; id={display.Id}; device={display.DeviceName}; ddc={display.DdcAvailable}; handle=0x{display.DdcHandle.ToInt64():X}.");
+                Log.Info($"Display state: {display.Name}; id={display.Id}; device={display.DeviceName}; ddc={display.DdcAvailable}; handle=0x{display.DdcHandle.ToInt64():X}; target={target}%.");
 
                 if (display.DdcAvailable)
                 {
                     anyDdc = true;
-                    var applied = await ApplyDdcCoreAsync(display, hardware).ConfigureAwait(false);
+                    var applied = await ApplyDdcCoreAsync(display, target).ConfigureAwait(false);
                     if (!applied)
                     {
                         state.DdcError = "DDC write failed";
@@ -292,27 +286,94 @@ internal sealed class DimmerController : IDisposable
         return null;
     }
 
-    public void SetLevel(int level)
+    public void SetAllHardwareBrightness(int percent)
     {
-        level = Math.Clamp(level, 0, 100);
-        _config.Level = level;
-
-        var hardware = HardwarePercentForLevel(level);
-        var software = SoftwarePercentForLevel(level);
+        percent = Math.Clamp(percent, 0, 100);
+        _config.HardwareMaster = percent;
 
         foreach (var monitor in GetMonitors())
         {
-            monitor.TargetPercent = hardware;
+            monitor.TargetPercent = percent;
             monitor.DdcError = null;
+
+            if (_config.Monitors.TryGetValue(monitor.Id, out var monitorConfig))
+            {
+                monitorConfig.Name = monitor.Name;
+                monitorConfig.Brightness = percent;
+            }
         }
 
-        Log.Info($"Level {level}%: hardware {hardware}%, software {software}%.");
+        Log.Info($"Hardware master: all monitors -> {percent}%.");
         QueueSave();
         StateChanged?.Invoke(this, EventArgs.Empty);
-        _ = ApplyLevelAsync(hardware, software);
+        _ = ApplyAllHardwareAsync(percent);
     }
 
-    private async Task ApplyLevelAsync(int hardware, int software)
+    public void SetHardwareBrightness(string id, int percent)
+    {
+        percent = Math.Clamp(percent, 0, 100);
+        var state = FindMonitor(id);
+        if (state is null)
+        {
+            Log.Warn($"DDC request for unknown monitor id '{id}'.");
+            return;
+        }
+
+        state.TargetPercent = percent;
+        state.DdcError = null;
+
+        if (!_config.Monitors.TryGetValue(id, out var monitorConfig))
+        {
+            monitorConfig = new MonitorConfig
+            {
+                Name = state.Name,
+                Brightness = percent
+            };
+            _config.Monitors[id] = monitorConfig;
+        }
+
+        monitorConfig.Name = state.Name;
+        monitorConfig.Brightness = percent;
+
+        Log.Info($"Hardware {state.Name} ({id}) -> {percent}%.");
+        QueueSave();
+        StateChanged?.Invoke(this, EventArgs.Empty);
+        _ = ApplyHardwareForStateAsync(state, percent);
+    }
+
+    private async Task ApplyHardwareForStateAsync(MonitorState state, int percent)
+    {
+        await _ddcGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var current = FindMonitor(state.Id);
+            if (current is null)
+            {
+                return;
+            }
+
+            var applied = await ApplyDdcCoreAsync(current.Display, percent).ConfigureAwait(false);
+            current.TargetPercent = percent;
+            current.CurrentPercent = PercentFromRaw(current.Display, current.Display.DdcCurrent);
+            current.DdcError = applied ? null : "DDC write failed";
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Set hardware brightness failed for " + state.Name, ex);
+        }
+        finally
+        {
+            _ddcGate.Release();
+        }
+    }
+
+    private async Task ApplyAllHardwareAsync(int percent)
     {
         await _ddcGate.WaitAsync().ConfigureAwait(false);
         try
@@ -331,7 +392,8 @@ internal sealed class DimmerController : IDisposable
                     continue;
                 }
 
-                var applied = await ApplyDdcCoreAsync(current.Display, hardware).ConfigureAwait(false);
+                var applied = await ApplyDdcCoreAsync(current.Display, percent).ConfigureAwait(false);
+                current.TargetPercent = percent;
                 current.CurrentPercent = PercentFromRaw(current.Display, current.Display.DdcCurrent);
                 current.DdcError = applied ? null : "DDC write failed";
             }
@@ -340,14 +402,22 @@ internal sealed class DimmerController : IDisposable
         }
         catch (Exception ex)
         {
-            Log.Error("Apply level failed.", ex);
+            Log.Error("Set all hardware brightness failed.", ex);
         }
         finally
         {
             _ddcGate.Release();
         }
+    }
 
-        ApplyMag(software);
+    public void SetSoftwareDim(int percent)
+    {
+        percent = Math.Clamp(percent, 0, 90);
+        _config.SoftwarePercent = percent;
+        Log.Info($"Software dim -> {percent}%.");
+        QueueSave();
+        StateChanged?.Invoke(this, EventArgs.Empty);
+        ApplyMag(percent);
     }
 
     private bool EnsureMagInitialized()
@@ -518,7 +588,25 @@ internal sealed class DimmerController : IDisposable
 
     public void ResetToFull()
     {
-        SetLevel(0);
+        _config.HardwareMaster = 100;
+        _config.SoftwarePercent = 0;
+
+        foreach (var monitor in GetMonitors())
+        {
+            monitor.TargetPercent = 100;
+            monitor.DdcError = null;
+
+            if (_config.Monitors.TryGetValue(monitor.Id, out var monitorConfig))
+            {
+                monitorConfig.Name = monitor.Name;
+                monitorConfig.Brightness = 100;
+            }
+        }
+
+        QueueSave();
+        ApplyMag(0);
+        _ = ApplyAllHardwareAsync(100);
+        StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void WatchdogTick()

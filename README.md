@@ -1,20 +1,19 @@
 # SteadyDim
 
-A small Windows tray app with one combined dimming slider:
+A small Windows tray app with **five independent dimming controls**:
 
-- **0–50%** — shared DDC/CI hardware brightness, 100% down to 0%.
-- **50–100%** — Windows Magnification software dim, 0% up to 90% reduction.
+- **Master hardware slider** — pushes all per-monitor DDC sliders to one value.
+- **Three per-monitor hardware sliders** — real DDC/CI backlight per display.
+- **One software-dim slider** — global Magnification layer, 0–90% reduction.
 
-Hardware comes first, so the backlight is already at its minimum before the
-software layer starts. The software layer is applied by the compositor, not by a
-topmost black overlay, so new windows, taskbar previews, and Alt+Tab cannot get
-above it.
+There is no gamma layer and no topmost black overlay, so per-monitor hardware
+control and the deep software layer can coexist without the gamma/Mag conflict.
 
 ## Features
 
-- One 0–100% slider with a hardware-first, software-second curve.
-- Shared DDC/CI brightness across all monitors.
-- Global software dim from 50–100% on the slider, up to 90% reduction.
+- One master DDC slider plus one DDC slider per monitor.
+- Per-monitor hardware brightness for balancing different panels.
+- Global software dim up to 90% reduction.
 - No overlays and no z-order race.
 - Automatic rescan on display mode changes, monitor arrival/removal, resume from
   sleep, and session unlock.
@@ -45,9 +44,8 @@ Download the release zip and extract it to a writable folder.
    apphosts and deny registry/AppData access.
 2. If your security software does not sandbox unsigned apps, `SteadyDim.exe` can
    be launched directly instead.
-3. Move the single slider:
-   - 0–50% adjusts hardware brightness from 100% to 0%.
-   - 50–100% keeps hardware at 0% and adds software dim from 0% to 90%.
+3. Use the **master hardware slider** to move all monitors together, then adjust
+   each monitor's hardware slider. Use **Software dim** for the deep layer.
 4. Leave **Start at logon** checked to register the `SteadyDim` scheduled task.
 
 The panel hides when it loses focus. Reopen it from the tray icon or by running
@@ -57,7 +55,9 @@ the launcher again.
 
 The tray panel has:
 
-- **Dimming level** — one 0–100% slider.
+- **Hardware brightness (DDC/CI)** — one master slider plus one slider per
+  monitor, 0–100%.
+- **Software dim (all monitors)** — global 0–90% reduction.
 - **Start at logon** — creates or removes the scheduled task.
 
 Tray menu:
@@ -99,10 +99,10 @@ dotnet SteadyDim.dll --diagnose
 
 ## Limitations
 
-- The software layer is **global**, not per monitor. The hardware base is shared
-  across all monitors.
+- The software layer is **global**, not per monitor. Per-monitor control is the
+  hardware DDC layer.
 - The software layer is a desktop compositor effect. It may not apply to the
-  secure desktop (UAC) or some exclusive-fullscreen paths; the hardware base
+  secure desktop (UAC) or some exclusive-fullscreen paths; the hardware layer
   still applies.
 - Windows Magnifier also uses the Magnification API; running both at once may
   conflict.
@@ -119,6 +119,8 @@ dotnet SteadyDim.dll --diagnose
   then use the tray menu or restart the app so it rescans.
 - **The screen is too dark.** Use the tray menu **Reset to full brightness**, or
   run `--reset`.
+- **A monitor's DDC slider is disabled.** That monitor did not expose brightness
+  control; check its OSD/cable and rescan.
 - **Something failed.** Check `data\steadydim.log` and run `--diagnose`.
 
 ## Build
@@ -148,7 +150,7 @@ Create an empty GitHub repository, then push `main` and the tag:
 ```powershell
 git remote add origin https://github.com/<owner>/steady-dim.git
 git push -u origin main
-git push origin v2.0.0
+git push origin v3.0.0
 ```
 
 The tag push builds the release on GitHub. You can also attach the locally built

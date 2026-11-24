@@ -71,7 +71,13 @@ internal static class Recovery
         try
         {
             var config = ConfigStore.Load();
-            config.Level = 0;
+            config.HardwareMaster = 100;
+            config.SoftwarePercent = 0;
+            foreach (var monitor in config.Monitors.Values)
+            {
+                monitor.Brightness = 100;
+            }
+
             ConfigStore.Save(config);
             Log.Info("Recovery config reset.");
         }

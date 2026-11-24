@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.0.0 — 2026-11-24
+
+- Replaced the single combined slider with five sliders:
+  - one master hardware slider,
+  - three per-monitor DDC hardware sliders,
+  - one global software-dim slider.
+- The master hardware slider pushes all three per-monitor sliders to one value;
+  individual sliders then fine-tune each monitor.
+- Software dim remains global and goes up to 90%.
+- No gamma layer, so the software layer does not conflict with per-monitor
+  hardware control.
+- Settings schema 5 with `HardwareMaster`, per-monitor `Brightness`, and
+  `SoftwarePercent`.
+
 ## 2.0.0 — 2026-11-24
 
 - Replaced the separate hardware and gamma controls with one 0–100% slider:
