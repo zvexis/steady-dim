@@ -36,6 +36,7 @@ internal sealed class DimmerController : IDisposable
     private bool _disposed;
     private bool _savePending;
     private bool _magInitialized;
+    private int _softwareGeneration;
     private DateTime _lastWatchdogRescan = DateTime.MinValue;
 
     public DimmerController(AppConfig config)
@@ -82,7 +83,12 @@ internal sealed class DimmerController : IDisposable
             ScheduleRescan("startup DDC retry", 1500);
         }
 
-        ApplyMag(_config.SoftwarePercent);
+        if (_config.SoftwarePercent > 0 &&
+            !ApplyMag(_config.SoftwarePercent))
+        {
+            _ = RetrySoftwareAsync(_config.SoftwarePercent, _softwareGeneration);
+        }
+
         QueueSave();
     }
 
@@ -414,10 +420,37 @@ internal sealed class DimmerController : IDisposable
     {
         percent = Math.Clamp(percent, 0, 90);
         _config.SoftwarePercent = percent;
+        var generation = ++_softwareGeneration;
         Log.Info($"Software dim -> {percent}%.");
         QueueSave();
         StateChanged?.Invoke(this, EventArgs.Empty);
-        ApplyMag(percent);
+
+        if (!ApplyMag(percent) && percent > 0)
+        {
+            _ = RetrySoftwareAsync(percent, generation);
+        }
+    }
+
+    private async Task RetrySoftwareAsync(int percent, int generation)
+    {
+        foreach (var delay in new[] { 400, 800, 1600 })
+        {
+            await Task.Delay(delay).ConfigureAwait(false);
+            if (_disposed || generation != _softwareGeneration)
+            {
+                return;
+            }
+
+            if (ApplyMag(percent))
+            {
+                return;
+            }
+        }
+
+        if (!_disposed && generation == _softwareGeneration)
+        {
+            Log.Warn($"Software dim {percent}% is still unavailable; it will be retried on the next slider change.");
+        }
     }
 
     private bool EnsureMagInitialized()
@@ -447,20 +480,22 @@ internal sealed class DimmerController : IDisposable
         return false;
     }
 
-    private void ApplyMag(int reduction)
+    private bool ApplyMag(int reduction)
     {
         if (_disposed)
         {
-            return;
+            return false;
         }
 
         lock (_magGate)
         {
             if (reduction <= 0)
             {
-                if (!EnsureMagInitialized())
+                // Do not initialize Mag just to set an identity effect. Doing so
+                // at logon can leave the API in ERROR_NOT_READY for later use.
+                if (!_magInitialized)
                 {
-                    return;
+                    return true;
                 }
 
                 var identity = new Native.MAGCOLOREFFECT { transform = new float[25] };
@@ -473,14 +508,15 @@ internal sealed class DimmerController : IDisposable
                 if (!Native.MagSetFullscreenColorEffect(ref identity))
                 {
                     Log.Warn($"Mag identity reset failed (Win32 {Marshal.GetLastWin32Error()}).");
+                    return false;
                 }
 
-                return;
+                return true;
             }
 
             if (!EnsureMagInitialized())
             {
-                return;
+                return false;
             }
 
             var scale = Math.Clamp(1.0f - reduction / 100.0f, 0.10f, 1.0f);
@@ -494,11 +530,11 @@ internal sealed class DimmerController : IDisposable
             if (Native.MagSetFullscreenColorEffect(ref effect))
             {
                 Log.Info($"Software dim {reduction}% (scale={scale:0.00}).");
+                return true;
             }
-            else
-            {
-                Log.Warn($"MagSetFullscreenColorEffect failed (Win32 {Marshal.GetLastWin32Error()}) at {reduction}% software dim.");
-            }
+
+            Log.Warn($"MagSetFullscreenColorEffect failed (Win32 {Marshal.GetLastWin32Error()}) at {reduction}% software dim.");
+            return false;
         }
     }
 
@@ -604,6 +640,7 @@ internal sealed class DimmerController : IDisposable
         }
 
         QueueSave();
+        _softwareGeneration++;
         ApplyMag(0);
         _ = ApplyAllHardwareAsync(100);
         StateChanged?.Invoke(this, EventArgs.Empty);

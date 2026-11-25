@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.0.1 — 2026-11-25
+
+- Do not initialize the Magnification API while software dim is 0% at logon.
+  Initializing it early could leave later slider changes failing with
+  `ERROR_NOT_READY`.
+- Initialize Mag lazily on the first non-zero software-dim setting.
+- Retry a failed software setting up to three times after an explicit slider
+  change. No watchdog and no process restart.
+
 ## 3.0.0 — 2026-11-24
 
 - Replaced the single combined slider with five sliders:
